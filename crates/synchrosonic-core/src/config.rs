@@ -2,7 +2,11 @@ use std::{fs, path::Path};
 
 use serde::{Deserialize, Serialize};
 
-use crate::{error::ConfigError, models::QualityPreset};
+use crate::{
+    audio::{AudioSampleFormat, CaptureOutputs, CaptureSettings},
+    error::ConfigError,
+    models::QualityPreset,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AppConfig {
@@ -62,7 +66,10 @@ pub struct AudioConfig {
     pub preferred_source_id: Option<String>,
     pub local_playback_enabled: bool,
     pub sample_rate_hz: u32,
-    pub channels: u8,
+    pub channels: u16,
+    pub sample_format: AudioSampleFormat,
+    pub capture_buffer_frames: u32,
+    pub capture_latency_ms: u16,
 }
 
 impl Default for AudioConfig {
@@ -72,6 +79,26 @@ impl Default for AudioConfig {
             local_playback_enabled: true,
             sample_rate_hz: 48_000,
             channels: 2,
+            sample_format: AudioSampleFormat::S16Le,
+            capture_buffer_frames: 480,
+            capture_latency_ms: 50,
+        }
+    }
+}
+
+impl AudioConfig {
+    pub fn capture_settings(&self) -> CaptureSettings {
+        CaptureSettings {
+            source_id: self.preferred_source_id.clone(),
+            sample_rate_hz: self.sample_rate_hz,
+            channels: self.channels,
+            sample_format: self.sample_format,
+            buffer_frames: self.capture_buffer_frames,
+            target_latency_ms: self.capture_latency_ms,
+            outputs: CaptureOutputs {
+                local_monitoring: self.local_playback_enabled,
+                network_streaming: true,
+            },
         }
     }
 }
@@ -162,6 +189,7 @@ mod tests {
         assert!(config.discovery.enabled);
         assert_eq!(config.transport.stream_port, 51_700);
         assert_eq!(config.audio.sample_rate_hz, 48_000);
+        assert_eq!(config.audio.capture_buffer_frames, 480);
         assert!(config.audio.local_playback_enabled);
     }
 

@@ -35,6 +35,18 @@ pub enum ConfigError {
 pub enum AudioError {
     #[error("audio backend is unavailable: {0}")]
     BackendUnavailable(String),
+    #[error("audio command is unavailable: {0}")]
+    CommandUnavailable(String),
+    #[error("audio command `{command}` failed: {stderr}")]
+    CommandFailed { command: String, stderr: String },
+    #[error("failed to start audio process `{command}`: {source}")]
+    ProcessStart { command: String, source: io::Error },
+    #[error("audio process I/O failed while {context}: {source}")]
+    ProcessIo { context: String, source: io::Error },
+    #[error("invalid capture settings: {0}")]
+    InvalidSettings(String),
+    #[error("capture stream ended")]
+    CaptureEnded,
     #[error("audio operation is not active in this build phase: {0}")]
     NotActive(String),
 }
@@ -56,4 +68,3 @@ pub enum ReceiverError {
     #[error("receiver mode is not active in this build phase: {0}")]
     NotActive(String),
 }
-

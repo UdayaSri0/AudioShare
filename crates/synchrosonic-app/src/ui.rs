@@ -3,7 +3,7 @@ use gtk::{Align, Orientation};
 use synchrosonic_audio::LinuxAudioBackend;
 use synchrosonic_core::{
     services::{AudioBackend, DiscoveryService},
-    AppConfig, AppState,
+    AppConfig, AppState, AudioSourceKind, DiagnosticEvent,
 };
 use synchrosonic_discovery::MdnsDiscoveryService;
 use synchrosonic_receiver::ReceiverRuntime;
@@ -11,8 +11,29 @@ use synchrosonic_transport::LanTransportService;
 
 pub fn build_main_window(app: &adw::Application) {
     let config = AppConfig::default();
-    let state = AppState::new(config.clone());
+    let mut state = AppState::new(config.clone());
     let audio_backend = LinuxAudioBackend::new();
+    let audio_source_summary = match audio_backend.list_sources() {
+        Ok(sources) => {
+            let source_count = sources.len();
+            let selected = sources
+                .iter()
+                .find(|source| source.is_default && source.kind == AudioSourceKind::Monitor)
+                .or_else(|| sources.iter().find(|source| source.is_default))
+                .or_else(|| sources.first())
+                .map(|source| source.display_name.clone())
+                .unwrap_or_else(|| "No source selected".to_string());
+            state.set_audio_sources(sources);
+            format!("{source_count} capture source(s) available. Selected: {selected}")
+        }
+        Err(error) => {
+            let message = format!("PipeWire source enumeration failed: {error}");
+            state
+                .diagnostics
+                .push(DiagnosticEvent::warning("audio", message.clone()));
+            message
+        }
+    };
     let discovery = MdnsDiscoveryService::new(
         config.discovery.clone(),
         config.receiver.advertised_name.clone(),
@@ -45,13 +66,22 @@ pub fn build_main_window(app: &adw::Application) {
     stack.set_vexpand(true);
 
     stack.add_titled(
-        &dashboard_page(&state, audio_backend.backend_name()),
+        &dashboard_page(&state, audio_backend.backend_name(), &audio_source_summary),
         Some("dashboard"),
         "Dashboard",
     );
-    stack.add_titled(&status_page("Devices", "LAN discovery is not active yet."), Some("devices"), "Devices");
     stack.add_titled(
-        &status_page("Audio", "PipeWire source and output enumeration arrives in the audio phase."),
+        &status_page("Devices", "LAN discovery is not active yet."),
+        Some("devices"),
+        "Devices",
+    );
+    stack.add_titled(
+        &status_page(
+            "Audio",
+            &format!(
+                "{audio_source_summary}\nCapture frames expose sequence, timestamp, PCM payload bytes, peak, and RMS stats for local monitoring and the network encoder."
+            ),
+        ),
         Some("audio"),
         "Audio",
     );
@@ -67,7 +97,14 @@ pub fn build_main_window(app: &adw::Application) {
         Some("diagnostics"),
         "Diagnostics",
     );
-    stack.add_titled(&status_page("Settings", "Typed default configuration is loaded in memory."), Some("settings"), "Settings");
+    stack.add_titled(
+        &status_page(
+            "Settings",
+            "Typed default configuration is loaded in memory.",
+        ),
+        Some("settings"),
+        "Settings",
+    );
     stack.add_titled(&about_page(), Some("about"), "About");
 
     let sidebar = gtk::StackSidebar::new();
@@ -90,7 +127,11 @@ pub fn build_main_window(app: &adw::Application) {
     window.present();
 }
 
-fn dashboard_page(state: &AppState, audio_backend_name: &str) -> gtk::Box {
+fn dashboard_page(
+    state: &AppState,
+    audio_backend_name: &str,
+    audio_source_summary: &str,
+) -> gtk::Box {
     let page = gtk::Box::new(Orientation::Vertical, 12);
     page.set_margin_top(24);
     page.set_margin_bottom(24);
@@ -103,16 +144,18 @@ fn dashboard_page(state: &AppState, audio_backend_name: &str) -> gtk::Box {
     page.append(&title);
 
     let summary = gtk::Label::new(Some(
-        "The architecture scaffold is active. Real capture, discovery, transport, and receiver playback are intentionally disabled until their phases implement verified behavior.",
+        "PipeWire source enumeration is active. Cast controls stay disabled until transport and receiver playback are wired to verified end-to-end session behavior.",
     ));
     summary.set_wrap(true);
     summary.set_halign(Align::Start);
     page.append(&summary);
 
     let status = gtk::Label::new(Some(&format!(
-        "Session: {:?}\nAudio backend boundary: {}\nDefault stream port: {}\nLocal playback default: {}",
+        "Session: {:?}\nCapture: {:?}\nAudio backend: {}\n{}\nDefault stream port: {}\nLocal playback default: {}",
         state.cast_session,
+        state.capture_state,
         audio_backend_name,
+        audio_source_summary,
         state.config.transport.stream_port,
         if state.config.audio.local_playback_enabled {
             "enabled"
@@ -127,7 +170,7 @@ fn dashboard_page(state: &AppState, audio_backend_name: &str) -> gtk::Box {
     let start_button = gtk::Button::with_label("Start Casting");
     start_button.set_sensitive(false);
     start_button.set_tooltip_text(Some(
-        "Disabled in the scaffold so the UI does not imply fake streaming.",
+        "Disabled until the capture session is connected to transport and receiver playback.",
     ));
     start_button.set_halign(Align::Start);
     page.append(&start_button);

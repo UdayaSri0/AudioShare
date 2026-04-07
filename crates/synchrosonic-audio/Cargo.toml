@@ -9,5 +9,8 @@ authors.workspace = true
 
 [dependencies]
 synchrosonic-core = { path = "../synchrosonic-core" }
+serde_json.workspace = true
 tracing.workspace = true
 
+[dev-dependencies]
+tracing-subscriber.workspace = true

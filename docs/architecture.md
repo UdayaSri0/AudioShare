@@ -11,9 +11,9 @@ network transport, and receiver mode.
   PipeWire or network sockets.
 - `synchrosonic-core` owns shared domain models, typed configuration,
   diagnostics, state, and service traits used by the other crates.
-- `synchrosonic-audio` owns the Linux audio backend boundary. The initial
-  backend reports that real PipeWire enumeration/capture is not active yet
-  rather than inventing fake sources.
+- `synchrosonic-audio` owns the Linux audio backend boundary. It enumerates
+  PipeWire sources/playback targets and exposes raw capture frames through the
+  portable audio traits in `synchrosonic-core`.
 - `synchrosonic-discovery` owns mDNS service metadata and will later own LAN
   receiver discovery and sender announcements.
 - `synchrosonic-transport` owns the LAN streaming session model and will later
@@ -51,10 +51,15 @@ disabled until the audio and transport milestones implement real behavior.
 ## Audio Boundary
 
 PipeWire is the preferred Linux audio integration point for source enumeration,
-capture, and local mirror playback. The current scaffold exposes a
-`AudioBackend` trait and a `LinuxAudioBackend` type. The backend returns a typed
-unavailable error for source/output enumeration until the PipeWire milestone
-implements real discovery.
+capture, and local mirror playback. The current backend uses `pw-dump` to map
+`Audio/Sink` nodes to system-output monitor capture sources and `Audio/Source`
+nodes to capture-capable inputs. Capture uses `pw-record` to emit raw PCM frames
+through `AudioCapture`.
+
+`AudioFrame` carries sequence, timestamp, format metadata, PCM bytes, and
+peak/RMS stats. The application layer can fan these frames out to local
+monitoring/playback and the future network streaming encoder without coupling
+GTK widgets to PipeWire.
 
 ## Discovery And Transport Boundary
 
@@ -69,4 +74,3 @@ Bluetooth support is intentionally deferred. Bluetooth speakers should not be
 treated as receiver nodes because they cannot run SynchroSonic receiver code.
 Future Bluetooth work should be modeled as an output/backend capability on a
 receiver or local device, not as the first LAN transport.
-

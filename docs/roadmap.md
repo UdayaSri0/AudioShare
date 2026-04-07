@@ -10,10 +10,12 @@
 
 ## Phase 2: Linux Audio Capture
 
-- [ ] Choose and document the PipeWire Rust integration strategy.
-- [ ] Enumerate PipeWire sources and outputs.
-- [ ] Surface missing PipeWire/session errors in diagnostics.
-- [ ] Add capture session start/stop lifecycle.
+- [x] Choose and document the initial PipeWire integration strategy.
+- [x] Enumerate PipeWire sources and outputs through the Linux audio backend.
+- [x] Surface missing PipeWire tool/process errors through typed audio errors.
+- [x] Add capture session start/stop lifecycle and debug stats hook.
+- [ ] Wire capture start/stop to end-to-end sender session controls.
+- [ ] Revisit direct PipeWire bindings once system headers/API strategy are settled.
 
 ## Phase 3: LAN Discovery
 
@@ -59,4 +61,3 @@
 - [ ] Model Bluetooth as an output/backend capability.
 - [ ] Avoid adding Bluetooth transport behavior to the LAN MVP.
 - [ ] Document receiver-side Bluetooth sink setup once supported.
-

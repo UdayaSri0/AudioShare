@@ -14,8 +14,8 @@ network transport, and receiver mode.
 - `synchrosonic-audio` owns the Linux audio backend boundary. It enumerates
   PipeWire sources/playback targets and exposes raw capture frames through the
   portable audio traits in `synchrosonic-core`.
-- `synchrosonic-discovery` owns mDNS service metadata and will later own LAN
-  receiver discovery and sender announcements.
+- `synchrosonic-discovery` owns mDNS service advertisement, browsing, and the
+  in-memory registry of SynchroSonic devices seen on the LAN.
 - `synchrosonic-transport` owns the LAN streaming session model and will later
   own stream framing, connection lifecycle, and quality/latency controls.
 - `synchrosonic-receiver` owns receiver-mode startup state and will later connect
@@ -63,10 +63,15 @@ GTK widgets to PipeWire.
 
 ## Discovery And Transport Boundary
 
-mDNS/zeroconf discovery will be used for LAN receiver discovery. Transport is
-modeled separately so the streaming protocol can evolve without touching GTK UI
-code. The current transport crate tracks session state but does not open network
-connections yet.
+mDNS/zeroconf discovery is implemented with `_synchrosonic._tcp.local.` service
+advertisement and browsing. Each advertised TXT record includes device identity,
+app/protocol version, capabilities, and availability. Discovery events update
+`AppState::discovered_devices`; GTK widgets render from app state instead of
+owning mDNS sockets.
+
+Transport is modeled separately so the streaming protocol can evolve without
+touching GTK UI code. The current transport crate tracks session state but does
+not open network connections yet.
 
 ## Bluetooth Scope
 

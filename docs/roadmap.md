@@ -19,10 +19,11 @@
 
 ## Phase 3: LAN Discovery
 
-- [ ] Choose and document the mDNS crate and service naming scheme.
-- [ ] Announce sender/receiver services.
-- [ ] Discover compatible receivers.
-- [ ] Add device list state and diagnostics.
+- [x] Choose and document the mDNS crate and service naming scheme.
+- [x] Announce sender/receiver services with versioned TXT metadata.
+- [x] Discover compatible devices and maintain an in-memory registry.
+- [x] Add device list state and diagnostics path.
+- [ ] Add richer GUI controls for filtering/selecting discovered receivers.
 
 ## Phase 4: Receiver Mode And Playback
 

@@ -5,9 +5,9 @@ for capturing system audio and sending it to other devices over Wi-Fi/LAN, while
 optionally keeping playback active on the sender.
 
 This repository is currently in the early implementation phase. The code builds
-a GTK4/libadwaita application shell, typed Rust module boundaries, and a Linux
-PipeWire tool-backed capture layer. It does not yet stream or play back audio
-end-to-end.
+a GTK4/libadwaita application shell, typed Rust module boundaries, a Linux
+PipeWire tool-backed capture layer, and mDNS LAN device discovery. It does not
+yet stream or play back audio end-to-end.
 
 ## Goals
 
@@ -23,7 +23,6 @@ end-to-end.
 ## Non-Goals For The Current Phase
 
 - No LAN streaming protocol implementation yet.
-- No mDNS service registration yet.
 - No Bluetooth transport or pairing support yet.
 - No packaging or installer flow yet.
 
@@ -34,7 +33,8 @@ end-to-end.
   state, and service traits.
 - `crates/synchrosonic-audio`: Linux PipeWire-backed source enumeration and raw
   capture frame production.
-- `crates/synchrosonic-discovery`: discovery model and mDNS service metadata.
+- `crates/synchrosonic-discovery`: mDNS service advertisement, browsing, and
+  in-memory device registry.
 - `crates/synchrosonic-transport`: LAN transport session model.
 - `crates/synchrosonic-receiver`: receiver-mode runtime boundary.
 - `docs/architecture.md`: current architecture overview.
@@ -59,6 +59,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo build --workspace
 RUST_LOG=debug cargo run -p synchrosonic-app
 RUST_LOG=synchrosonic_audio=debug cargo run -p synchrosonic-audio --example capture_probe
+RUST_LOG=synchrosonic_discovery=debug cargo run -p synchrosonic-discovery --example discovery_probe
 ```
 
 ## License

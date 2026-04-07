@@ -14,7 +14,8 @@ pub use config::AppConfig;
 pub use diagnostics::{DiagnosticEvent, DiagnosticLevel};
 pub use error::{AppError, AudioError, ConfigError, DiscoveryError, ReceiverError, TransportError};
 pub use models::{
-    AudioSource, AudioSourceKind, DeviceCapabilities, DeviceId, DeviceRole, DeviceStatus,
-    PlaybackTarget, QualityPreset, TransportEndpoint,
+    AudioSource, AudioSourceKind, DeviceAvailability, DeviceCapabilities, DeviceId, DeviceRole,
+    DeviceStatus, DiscoveredDevice, DiscoveryEvent, DiscoverySnapshot, PlaybackTarget,
+    QualityPreset, TransportEndpoint, DISCOVERY_PROTOCOL_VERSION,
 };
 pub use state::{AppState, CastSessionState};

@@ -53,6 +53,18 @@ pub enum AudioError {
 
 #[derive(Debug, Error)]
 pub enum DiscoveryError {
+    #[error("failed to start discovery daemon: {0}")]
+    Daemon(String),
+    #[error("failed to build mDNS service info: {0}")]
+    ServiceInfo(String),
+    #[error("failed to register mDNS service: {0}")]
+    Register(String),
+    #[error("failed to browse mDNS service: {0}")]
+    Browse(String),
+    #[error("failed to stop discovery service: {0}")]
+    Stop(String),
+    #[error("failed to process discovery event: {0}")]
+    Event(String),
     #[error("discovery is not active in this build phase: {0}")]
     NotActive(String),
 }

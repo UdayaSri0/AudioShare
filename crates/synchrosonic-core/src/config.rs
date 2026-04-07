@@ -107,6 +107,7 @@ impl AudioConfig {
 pub struct DiscoveryConfig {
     pub enabled: bool,
     pub service_type: String,
+    pub stale_timeout_secs: u64,
 }
 
 impl Default for DiscoveryConfig {
@@ -114,6 +115,7 @@ impl Default for DiscoveryConfig {
         Self {
             enabled: true,
             service_type: "_synchrosonic._tcp.local.".to_string(),
+            stale_timeout_secs: 30,
         }
     }
 }

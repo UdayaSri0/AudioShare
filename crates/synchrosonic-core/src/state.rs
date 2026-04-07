@@ -4,7 +4,10 @@ use crate::{
     audio::CaptureState,
     config::AppConfig,
     diagnostics::DiagnosticEvent,
-    models::{AudioSource, AudioSourceKind, DeviceId, DeviceStatus},
+    models::{
+        AudioSource, AudioSourceKind, DeviceId, DeviceStatus, DiscoveredDevice, DiscoveryEvent,
+        DiscoverySnapshot,
+    },
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -31,6 +34,7 @@ pub struct AppState {
     pub audio_sources: Vec<AudioSource>,
     pub selected_audio_source_id: Option<String>,
     pub devices: Vec<DeviceState>,
+    pub discovered_devices: Vec<DiscoveredDevice>,
     pub diagnostics: Vec<DiagnosticEvent>,
 }
 
@@ -43,6 +47,7 @@ impl AppState {
             audio_sources: Vec::new(),
             selected_audio_source_id: None,
             devices: Vec::new(),
+            discovered_devices: Vec::new(),
             diagnostics: vec![DiagnosticEvent::info(
                 "app",
                 "Project scaffold initialized; audio capture is ready for backend enumeration.",
@@ -82,6 +87,61 @@ impl AppState {
         self.capture_state = CaptureState::SourceChanged;
         true
     }
+
+    pub fn apply_discovery_snapshot(&mut self, snapshot: DiscoverySnapshot) {
+        self.discovered_devices = snapshot.devices;
+        self.devices = self
+            .discovered_devices
+            .iter()
+            .map(|device| DeviceState {
+                id: device.id.clone(),
+                display_name: device.display_name.clone(),
+                status: device.status,
+            })
+            .collect();
+    }
+
+    pub fn apply_discovery_event(&mut self, event: DiscoveryEvent) {
+        match event {
+            DiscoveryEvent::DeviceDiscovered(device) | DiscoveryEvent::DeviceUpdated(device) => {
+                self.upsert_discovered_device(device);
+            }
+            DiscoveryEvent::DeviceRemoved { device_id, .. } => {
+                self.discovered_devices
+                    .retain(|device| device.id != device_id);
+                self.devices.retain(|device| device.id != device_id);
+            }
+            DiscoveryEvent::DeviceExpired(device) => {
+                self.upsert_discovered_device(device);
+            }
+        }
+    }
+
+    fn upsert_discovered_device(&mut self, device: DiscoveredDevice) {
+        match self
+            .discovered_devices
+            .iter_mut()
+            .find(|existing| existing.id == device.id)
+        {
+            Some(existing) => *existing = device.clone(),
+            None => self.discovered_devices.push(device.clone()),
+        }
+
+        let device_state = DeviceState {
+            id: device.id,
+            display_name: device.display_name,
+            status: device.status,
+        };
+
+        match self
+            .devices
+            .iter_mut()
+            .find(|existing| existing.id == device_state.id)
+        {
+            Some(existing) => *existing = device_state,
+            None => self.devices.push(device_state),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -96,6 +156,7 @@ mod tests {
         assert_eq!(state.capture_state, CaptureState::Idle);
         assert_eq!(state.diagnostics.len(), 1);
         assert_eq!(state.devices.len(), 0);
+        assert_eq!(state.discovered_devices.len(), 0);
     }
 
     #[test]
@@ -118,5 +179,33 @@ mod tests {
 
         assert_eq!(state.selected_audio_source_id.as_deref(), Some("speaker"));
         assert_eq!(state.config.audio.preferred_source_id.as_deref(), Some("speaker"));
+    }
+
+    #[test]
+    fn discovery_events_update_app_state_device_views() {
+        let mut state = AppState::new(AppConfig::default());
+        let device = DiscoveredDevice {
+            id: DeviceId::new("receiver-1"),
+            display_name: "Living Room".to_string(),
+            app_version: "0.1.0".to_string(),
+            protocol_version: crate::models::DISCOVERY_PROTOCOL_VERSION,
+            capabilities: crate::models::DeviceCapabilities::receiver(),
+            availability: crate::models::DeviceAvailability::Available,
+            status: DeviceStatus::Discovered,
+            endpoint: None,
+            service_fullname: "Living Room._synchrosonic._tcp.local.".to_string(),
+            last_seen_unix_ms: 1,
+        };
+
+        state.apply_discovery_event(DiscoveryEvent::DeviceDiscovered(device.clone()));
+        assert_eq!(state.discovered_devices.len(), 1);
+        assert_eq!(state.devices.len(), 1);
+
+        state.apply_discovery_event(DiscoveryEvent::DeviceRemoved {
+            device_id: device.id,
+            service_fullname: device.service_fullname,
+        });
+        assert!(state.discovered_devices.is_empty());
+        assert!(state.devices.is_empty());
     }
 }

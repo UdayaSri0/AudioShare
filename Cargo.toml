@@ -1,0 +1,28 @@
+[workspace]
+members = [
+    "crates/synchrosonic-app",
+    "crates/synchrosonic-audio",
+    "crates/synchrosonic-core",
+    "crates/synchrosonic-discovery",
+    "crates/synchrosonic-receiver",
+    "crates/synchrosonic-transport",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/synchrosonic/synchrosonic"
+authors = ["SynchroSonic Contributors"]
+
+[workspace.dependencies]
+adw = { package = "libadwaita", version = "0.7" }
+gtk = { package = "gtk4", version = "0.9" }
+serde = { version = "1", features = ["derive"] }
+tempfile = "3"
+thiserror = "2"
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }

@@ -1,0 +1,16 @@
+pub mod config;
+pub mod diagnostics;
+pub mod error;
+pub mod models;
+pub mod services;
+pub mod state;
+
+pub use config::AppConfig;
+pub use diagnostics::{DiagnosticEvent, DiagnosticLevel};
+pub use error::{AppError, AudioError, ConfigError, DiscoveryError, ReceiverError, TransportError};
+pub use models::{
+    AudioSource, AudioSourceKind, DeviceCapabilities, DeviceId, DeviceRole, DeviceStatus,
+    PlaybackTarget, QualityPreset, TransportEndpoint,
+};
+pub use state::{AppState, CastSessionState};
+

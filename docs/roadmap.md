@@ -1,0 +1,62 @@
+# SynchroSonic Roadmap
+
+## Phase 1: Project Foundation
+
+- [x] Create Rust workspace.
+- [x] Add GTK4/libadwaita application shell.
+- [x] Add core models, configuration, diagnostics, state, and service traits.
+- [x] Add architecture documentation and first ADR.
+- [x] Add compile/test/format baseline.
+
+## Phase 2: Linux Audio Capture
+
+- [ ] Choose and document the PipeWire Rust integration strategy.
+- [ ] Enumerate PipeWire sources and outputs.
+- [ ] Surface missing PipeWire/session errors in diagnostics.
+- [ ] Add capture session start/stop lifecycle.
+
+## Phase 3: LAN Discovery
+
+- [ ] Choose and document the mDNS crate and service naming scheme.
+- [ ] Announce sender/receiver services.
+- [ ] Discover compatible receivers.
+- [ ] Add device list state and diagnostics.
+
+## Phase 4: Receiver Mode And Playback
+
+- [ ] Add receiver runtime startup path.
+- [ ] Add playback sink selection.
+- [ ] Add receiver diagnostics and shutdown behavior.
+
+## Phase 5: Sender To Receiver Streaming
+
+- [ ] Design and document the stream framing protocol.
+- [ ] Implement sender transport sessions.
+- [ ] Implement receiver transport sessions.
+- [ ] Add latency/quality settings with tested defaults.
+
+## Phase 6: Simultaneous Local Playback
+
+- [ ] Add local playback mirror mode.
+- [ ] Validate PipeWire routing behavior.
+- [ ] Document limitations and troubleshooting.
+
+## Phase 7: GUI Completion
+
+- [ ] Wire dashboard controls to real sessions.
+- [ ] Add device discovery page.
+- [ ] Add audio source/output selection.
+- [ ] Add settings, diagnostics, and about details.
+
+## Phase 8: Packaging And Release
+
+- [ ] Decide Flatpak and distro packaging strategy.
+- [ ] Add CI checks.
+- [ ] Add release documentation.
+
+## Deferred: Bluetooth Output Support
+
+- [ ] Model Bluetooth as an output/backend capability.
+- [ ] Avoid adding Bluetooth transport behavior to the LAN MVP.
+- [ ] Document receiver-side Bluetooth sink setup once supported.
+

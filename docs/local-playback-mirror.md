@@ -5,9 +5,9 @@ stream is being cast to a LAN receiver.
 
 ## Goal
 
-One captured PipeWire stream fans out into two explicit branches:
+One captured PipeWire stream fans out into two explicit branch families:
 
-- network sender branch
+- network sender branches
 - local playback mirror branch
 
 The fan-out is implemented inside `LanSenderSession`, not in the UI or audio
@@ -30,7 +30,9 @@ Each branch has its own queue and worker:
 
 - network branch:
   - owns TCP audio writes and heartbeat/stop messages
-  - can stall or reconnect without blocking local playback writes
+  - exists once per active receiver target
+  - can stall or reconnect without blocking local playback writes or other
+    receiver branches
 - local mirror branch:
   - owns sender-side `pw-play`
   - can be enabled or disabled during an active cast session
@@ -89,7 +91,7 @@ pw-record
   -> LinuxAudioBackend / AudioCapture
   -> LanSenderSession
   -> explicit fan-out
-     -> bounded network queue
+     -> bounded network queue per receiver target
         -> TCP framed transport
         -> receiver runtime buffer
         -> receiver pw-play

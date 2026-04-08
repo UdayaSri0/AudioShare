@@ -102,11 +102,13 @@ mod tests {
         }
 
         fn try_recv_frame(&mut self) -> Result<Option<AudioFrame>, AudioError> {
-            if self.index >= self.frames.len() {
+            if self.frames.is_empty() {
                 return Ok(None);
             }
 
-            let frame = self.frames[self.index].clone();
+            let mut frame = self.frames[self.index % self.frames.len()].clone();
+            frame.sequence = self.index as u64;
+            frame.captured_at = Duration::from_millis((self.index as u64) * 10);
             self.index += 1;
             Ok(Some(frame))
         }
@@ -247,6 +249,107 @@ mod tests {
     }
 
     #[test]
+    fn sender_can_stream_to_multiple_targets_and_remove_one_without_stopping_the_other() {
+        let receiver_one_bytes = Arc::new(AtomicUsize::new(0));
+        let receiver_two_bytes = Arc::new(AtomicUsize::new(0));
+
+        let Some(receiver_one) = spawn_test_receiver(Arc::new(MockPlaybackEngine {
+            bytes_written: Arc::clone(&receiver_one_bytes),
+        })) else {
+            return;
+        };
+        let Some(receiver_two) = spawn_test_receiver(Arc::new(MockPlaybackEngine {
+            bytes_written: Arc::clone(&receiver_two_bytes),
+        })) else {
+            return;
+        };
+
+        let frames = vec![
+            AudioFrame::from_payload(
+                0,
+                Duration::from_millis(0),
+                &CaptureSettings::default(),
+                vec![0; 1_920],
+            ),
+            AudioFrame::from_payload(
+                1,
+                Duration::from_millis(10),
+                &CaptureSettings::default(),
+                vec![0; 1_920],
+            ),
+        ];
+        let backend = MockAudioBackend {
+            frames: Arc::new(Mutex::new(frames)),
+        };
+        let mut sender = LanSenderSession::with_playback_engine(
+            synchrosonic_core::config::TransportConfig::default(),
+            Arc::new(MockPlaybackEngine {
+                bytes_written: Arc::new(AtomicUsize::new(0)),
+            }),
+        );
+
+        sender
+            .start(
+                backend.clone(),
+                CaptureSettings::default(),
+                SenderTarget::new(
+                    synchrosonic_core::DeviceId::new("receiver-1"),
+                    "Receiver One",
+                    synchrosonic_core::TransportEndpoint {
+                        device_id: synchrosonic_core::DeviceId::new("receiver-1"),
+                        address: receiver_one.listen_addr,
+                    },
+                ),
+                "Sender",
+            )
+            .expect("first target should start");
+        thread::sleep(Duration::from_millis(150));
+
+        sender
+            .start(
+                backend,
+                CaptureSettings::default(),
+                SenderTarget::new(
+                    synchrosonic_core::DeviceId::new("receiver-2"),
+                    "Receiver Two",
+                    synchrosonic_core::TransportEndpoint {
+                        device_id: synchrosonic_core::DeviceId::new("receiver-2"),
+                        address: receiver_two.listen_addr,
+                    },
+                ),
+                "Sender",
+            )
+            .expect("second target should join active manager");
+        thread::sleep(Duration::from_millis(200));
+
+        let snapshot = sender.snapshot();
+        assert_eq!(snapshot.state, synchrosonic_core::StreamSessionState::Streaming);
+        assert_eq!(snapshot.targets.len(), 2);
+        assert!(snapshot
+            .targets
+            .iter()
+            .all(|target| target.state == synchrosonic_core::StreamSessionState::Streaming));
+        assert!(receiver_one_bytes.load(Ordering::SeqCst) > 0);
+        assert!(receiver_two_bytes.load(Ordering::SeqCst) > 0);
+
+        sender
+            .stop_target(&synchrosonic_core::DeviceId::new("receiver-1"))
+            .expect("first target should stop independently");
+        let receiver_two_before = receiver_two_bytes.load(Ordering::SeqCst);
+        thread::sleep(Duration::from_millis(150));
+
+        let snapshot_after = sender.snapshot();
+        assert_eq!(snapshot_after.state, synchrosonic_core::StreamSessionState::Streaming);
+        assert_eq!(snapshot_after.targets.len(), 1);
+        assert_eq!(snapshot_after.targets[0].receiver_id.as_str(), "receiver-2");
+        assert!(receiver_two_bytes.load(Ordering::SeqCst) > receiver_two_before);
+
+        sender.stop().expect("sender manager should stop");
+        receiver_one.shutdown();
+        receiver_two.shutdown();
+    }
+
+    #[test]
     fn receiver_server_snapshot_starts_inactive() {
         let server = LanReceiverTransportServer::new(
             std::net::SocketAddr::from(([127, 0, 0, 1], 51_700)),
@@ -266,5 +369,73 @@ mod tests {
             sender.snapshot().state,
             synchrosonic_core::StreamSessionState::Idle
         );
+    }
+
+    struct SpawnedReceiver {
+        runtime: Arc<Mutex<ReceiverRuntime>>,
+        server: LanReceiverTransportServer,
+        listen_addr: std::net::SocketAddr,
+    }
+
+    impl SpawnedReceiver {
+        fn shutdown(mut self) {
+            self.server.stop().expect("receiver server should stop");
+            self.runtime
+                .lock()
+                .expect("receiver runtime mutex")
+                .stop()
+                .expect("receiver runtime should stop");
+        }
+    }
+
+    fn spawn_test_receiver(playback_engine: Arc<dyn PlaybackEngine>) -> Option<SpawnedReceiver> {
+        let mut receiver_config = synchrosonic_core::config::ReceiverConfig::default();
+        receiver_config.enabled = true;
+        receiver_config.listen_port = 0;
+        let runtime = Arc::new(Mutex::new(ReceiverRuntime::with_playback_engine(
+            receiver_config.clone(),
+            playback_engine,
+        )));
+        runtime
+            .lock()
+            .expect("receiver runtime mutex")
+            .start()
+            .expect("receiver runtime should start");
+
+        let mut server = LanReceiverTransportServer::new(
+            std::net::SocketAddr::from(([127, 0, 0, 1], receiver_config.listen_port)),
+            receiver_config.advertised_name.clone(),
+            receiver_config.latency_preset,
+            500,
+        );
+        {
+            let runtime_for_events = Arc::clone(&runtime);
+            match server.start(move |event: ReceiverTransportEvent| {
+                    runtime_for_events
+                        .lock()
+                        .map_err(|_| ReceiverError::ThreadJoin)?
+                        .submit_transport_event(event)
+                }) {
+                Ok(()) => {}
+                Err(synchrosonic_core::TransportError::Bind { source, .. })
+                    if source.kind() == std::io::ErrorKind::PermissionDenied =>
+                {
+                    runtime
+                        .lock()
+                        .expect("receiver runtime mutex")
+                        .stop()
+                        .expect("receiver runtime should stop after skipped bind");
+                    return None;
+                }
+                Err(error) => panic!("receiver server should start: {error}"),
+            }
+        }
+
+        let listen_addr = server.snapshot().bind_addr;
+        Some(SpawnedReceiver {
+            runtime,
+            server,
+            listen_addr,
+        })
     }
 }

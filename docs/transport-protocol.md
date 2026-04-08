@@ -1,13 +1,13 @@
 # Sender To Receiver Transport Protocol
 
-SynchroSonic's first LAN streaming path uses a single TCP connection per sender
-to receiver session and streams raw PCM packets over a small framed protocol.
+SynchroSonic's LAN streaming path uses one TCP connection per sender-to-receiver
+target session and streams raw PCM packets over a small framed protocol.
 
 ## Strategy
 
 - Transport: TCP
 - Audio encoding: raw PCM passthrough
-- Session shape: one sender to one receiver
+- Session shape: one sender to many independent receiver target sessions
 
 This LAN MVP prioritizes:
 
@@ -147,16 +147,21 @@ Purpose:
    heartbeat timing.
 3. Receiver validates `Hello`.
 4. Receiver sends `Accept` with the negotiated codec and stream parameters.
-5. Sender starts local capture and moves to `Streaming`.
-6. Sender streams `Audio` frames and periodic `Heartbeat` messages.
-7. Receiver translates wire frames into `ReceiverTransportEvent` values.
-8. Either side can send `Stop` or `Error`.
+5. Sender session manager adds this receiver target to its active target
+   collection.
+6. Shared capture frames are fanned out to every active target queue plus the
+   optional local mirror queue.
+7. Each target session streams `Audio` frames and periodic `Heartbeat`
+   messages independently.
+8. Receiver translates wire frames into `ReceiverTransportEvent` values.
+9. Either side can send `Stop` or `Error`.
 
 For the current MVP:
 
 - the only codec is `RawPcm`
 - stream parameters must match exactly after negotiation
-- a session is one sender to one receiver
+- each receiver target has its own transport session
+- multiple receiver sessions can exist at the same time under one sender manager
 
 ## Runtime Handoff
 
@@ -165,9 +170,9 @@ The end-to-end path is:
 ```text
 pw-record
   -> LinuxAudioBackend / AudioCapture
-  -> LanSenderSession
+  -> LanSenderSession manager
   -> explicit fan-out
-     -> bounded network queue
+     -> bounded network queue per receiver target
      -> bounded local mirror queue (optional)
   -> TCP socket
   -> SynchroSonic framed protocol

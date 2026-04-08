@@ -72,8 +72,8 @@ owning mDNS sockets.
 
 Transport is modeled separately so the streaming protocol can evolve without
 touching GTK UI code. The transport crate now owns TCP session setup,
-negotiation, heartbeats, sender-side branch fan-out, and the sender session
-state snapshot consumed by the UI.
+negotiation, heartbeats, sender-side branch fan-out, per-target session
+collection management, and the sender session state snapshot consumed by the UI.
 
 ## Bluetooth Scope
 

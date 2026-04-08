@@ -7,13 +7,14 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use flume::{Receiver, RecvTimeoutError, Sender, TryRecvError};
+use flume::{Receiver, RecvTimeoutError, Sender};
 use synchrosonic_audio::{LinuxPlaybackEngine, PlaybackEngine, PlaybackStartRequest};
 use synchrosonic_core::{
     config::TransportConfig,
-    services::AudioBackend,
-    AudioError, CaptureSettings, DeviceId, LocalMirrorState, ReceiverStreamConfig,
-    StreamSessionSnapshot, StreamSessionState, TransportEndpoint, TransportError,
+    services::{AudioBackend, AudioCapture},
+    AudioError, CaptureSettings, DeviceId, LocalMirrorState, ReceiverStreamConfig, StreamCodec,
+    StreamMetrics, StreamSessionSnapshot, StreamSessionState, StreamTargetHealth,
+    StreamTargetSnapshot, TransportEndpoint, TransportError,
 };
 
 use crate::{
@@ -99,56 +100,71 @@ impl LanSenderSession {
     where
         B: AudioBackend + Send + Sync + 'static,
     {
-        if self.control_tx.is_some() {
-            return Err(TransportError::AlreadyRunning);
+        let sender_name = sender_name.into();
+        let desired_stream = receiver_stream_config(&capture_settings);
+
+        if let Some(control_tx) = &self.control_tx {
+            let current_snapshot = self.snapshot();
+            if let Some(current_stream) = &current_snapshot.stream {
+                if current_stream != &desired_stream {
+                    return Err(TransportError::Negotiation(
+                        "changing capture stream parameters while the sender manager is active is not supported".to_string(),
+                    ));
+                }
+            }
+
+            control_tx
+                .send(SenderCommand::AddTarget(target))
+                .map_err(|_| TransportError::ChannelClosed)?;
+            return Ok(());
         }
 
-        let sender_name = sender_name.into();
-        let desired_local_mirror = capture_settings.outputs.local_monitoring;
         let (control_tx, control_rx) = flume::unbounded();
+        let manager_session_id = format!("sender-{}", now_unix_ms());
         let config = self.config.clone();
         let snapshot = Arc::clone(&self.snapshot);
         let playback_engine = Arc::clone(&self.playback_engine);
-        let mut target_snapshot = StreamSessionSnapshot::with_target(
-            target.receiver_id.clone(),
-            target.receiver_name.clone(),
-            target.endpoint.address,
-        );
-        target_snapshot.state = StreamSessionState::Connecting;
-        target_snapshot.local_mirror.desired_enabled = desired_local_mirror;
-        target_snapshot.local_mirror.state = if desired_local_mirror {
-            LocalMirrorState::Starting
+        let initial_target = target.clone();
+
+        let mut seeded_snapshot = StreamSessionSnapshot::default();
+        seeded_snapshot.session_id = Some(manager_session_id.clone());
+        seeded_snapshot.stream = Some(desired_stream.clone());
+        seeded_snapshot.local_mirror.desired_enabled = capture_settings.outputs.local_monitoring;
+        seeded_snapshot.local_mirror.state = if capture_settings.outputs.local_monitoring {
+            LocalMirrorState::Idle
         } else {
             LocalMirrorState::Disabled
         };
-        target_snapshot.local_mirror.playback_backend =
+        seeded_snapshot.local_mirror.playback_backend =
             Some(self.playback_engine.backend_name().to_string());
-        if let Ok(mut shared) = self.snapshot.lock() {
-            *shared = target_snapshot;
-        }
+        seeded_snapshot.targets.push(pending_target_snapshot(&initial_target));
+        seeded_snapshot.state = StreamSessionState::Connecting;
+        sync_snapshot(&self.snapshot, seeded_snapshot);
 
         self.worker = Some(thread::spawn(move || {
-            if let Err(error) = sender_worker_loop(
+            let mut manager = SenderManager::new(
                 backend,
                 playback_engine,
                 config,
                 capture_settings,
-                target,
                 sender_name,
-                Arc::clone(&snapshot),
+                manager_session_id,
+                snapshot,
                 control_rx,
-            ) {
-                tracing::error!(error = %error, "sender session ended with error");
-                if let Ok(mut shared) = snapshot.lock() {
-                    shared.state = StreamSessionState::Error;
-                    shared.last_error = Some(error.to_string());
-                    finalize_local_mirror_state(&mut shared);
-                }
-            }
+            );
+            manager.queue_target_connect(initial_target);
+            manager.run();
         }));
         self.control_tx = Some(control_tx);
 
         Ok(())
+    }
+
+    pub fn stop_target(&self, device_id: &DeviceId) -> Result<(), TransportError> {
+        let control_tx = self.control_tx.as_ref().ok_or(TransportError::NotRunning)?;
+        control_tx
+            .send(SenderCommand::RemoveTarget(device_id.clone()))
+            .map_err(|_| TransportError::ChannelClosed)
     }
 
     pub fn set_local_playback_enabled(&self, enabled: bool) -> Result<(), TransportError> {
@@ -178,7 +194,7 @@ impl LanSenderSession {
 
     pub fn stop(&mut self) -> Result<(), TransportError> {
         if let Some(control_tx) = self.control_tx.take() {
-            let _ = control_tx.send(SenderCommand::Stop);
+            let _ = control_tx.send(SenderCommand::Shutdown);
         }
 
         if let Some(worker) = self.worker.take() {
@@ -187,7 +203,8 @@ impl LanSenderSession {
 
         if let Ok(mut snapshot) = self.snapshot.lock() {
             snapshot.state = StreamSessionState::Idle;
-            finalize_local_mirror_state(&mut snapshot);
+            snapshot.targets.clear();
+            finalize_local_mirror_state(&mut snapshot.local_mirror, false);
         }
 
         Ok(())
@@ -201,8 +218,10 @@ impl Drop for LanSenderSession {
 }
 
 enum SenderCommand {
-    Stop,
+    AddTarget(SenderTarget),
+    RemoveTarget(DeviceId),
     SetLocalMirrorEnabled(bool),
+    Shutdown,
 }
 
 enum InboundControl {
@@ -238,7 +257,8 @@ impl NetworkBranch {
         let frame_rx = queue.receiver();
         let (control_tx, control_rx) = flume::unbounded();
         let (event_tx, event_rx) = flume::unbounded();
-        let worker = thread::spawn(move || network_writer_loop(stream, control_rx, frame_rx, event_tx));
+        let worker =
+            thread::spawn(move || network_writer_loop(stream, control_rx, frame_rx, event_tx));
 
         Self {
             queue,
@@ -278,6 +298,15 @@ impl NetworkBranch {
         events
     }
 
+    fn stop_and_shutdown(&mut self, reason: impl Into<String>) -> Result<(), TransportError> {
+        let _ = self.send_stop(reason);
+        if let Some(worker) = self.worker.take() {
+            worker.join().map_err(|_| TransportError::ThreadJoin)?;
+        }
+        self.queue.clear();
+        Ok(())
+    }
+
     fn shutdown(&mut self) -> Result<(), TransportError> {
         let _ = self.control_tx.send(NetworkControl::Shutdown);
         if let Some(worker) = self.worker.take() {
@@ -294,325 +323,848 @@ impl Drop for NetworkBranch {
     }
 }
 
-fn sender_worker_loop<B>(
-    backend: B,
-    playback_engine: Arc<dyn PlaybackEngine>,
-    config: TransportConfig,
-    capture_settings: CaptureSettings,
+struct ManagedTargetSession {
     target: SenderTarget,
-    sender_name: String,
-    snapshot: Arc<Mutex<StreamSessionSnapshot>>,
-    control_rx: Receiver<SenderCommand>,
-) -> Result<(), TransportError>
-where
-    B: AudioBackend + Send + Sync + 'static,
-{
-    let connect_timeout = Duration::from_millis(config.connect_timeout_ms.max(250) as u64);
-    let heartbeat_interval = Duration::from_millis(config.heartbeat_interval_ms.max(250) as u64);
-    let stream_config = ReceiverStreamConfig {
-        sample_rate_hz: capture_settings.sample_rate_hz,
-        channels: capture_settings.channels,
-        sample_format: capture_settings.sample_format,
-        frames_per_packet: capture_settings.buffer_frames,
-    };
-    let session_id = format!("stream-{}", now_unix_ms());
-    let local_mirror_request = PlaybackStartRequest {
-        stream: stream_config.clone(),
-        target_id: None,
-        latency_ms: capture_settings.target_latency_ms,
-    };
+    snapshot: StreamTargetSnapshot,
+    stream: TcpStream,
+    network_branch: NetworkBranch,
+    inbound_rx: Receiver<InboundControl>,
+    reader: Option<JoinHandle<()>>,
+    pending_heartbeats: HashMap<u64, Instant>,
+    heartbeat_nonce: u64,
+    last_heartbeat: Instant,
+    started_at: Instant,
+}
 
-    let mut shared_snapshot = StreamSessionSnapshot::with_target(
-        target.receiver_id.clone(),
-        target.receiver_name.clone(),
-        target.endpoint.address,
-    );
-    shared_snapshot.state = StreamSessionState::Connecting;
-    shared_snapshot.local_mirror.desired_enabled = capture_settings.outputs.local_monitoring;
-    shared_snapshot.local_mirror.state = if capture_settings.outputs.local_monitoring {
-        LocalMirrorState::Starting
-    } else {
-        LocalMirrorState::Disabled
-    };
-    shared_snapshot.local_mirror.playback_backend = Some(playback_engine.backend_name().to_string());
-    shared_snapshot.local_mirror.playback_target_id = local_mirror_request.target_id.clone();
-    sync_snapshot(&snapshot, shared_snapshot.clone());
+impl ManagedTargetSession {
+    fn connect(
+        target: SenderTarget,
+        request: &TargetConnectRequest,
+    ) -> Result<Self, StreamTargetSnapshot> {
+        let mut snapshot = pending_target_snapshot(&target);
+        let session_id = format!(
+            "{}-{}-{}",
+            request.manager_session_id,
+            target.receiver_id,
+            now_unix_ms()
+        );
 
-    let mut stream = TcpStream::connect_timeout(&target.endpoint.address, connect_timeout)
-        .map_err(|source| TransportError::Connect {
-            address: target.endpoint.address.to_string(),
-            source,
-        })?;
-    stream
-        .set_nodelay(true)
-        .map_err(|source| TransportError::Io {
-            context: format!("enabling TCP_NODELAY for {}", target.endpoint.address),
-            source,
-        })?;
-
-    shared_snapshot.state = StreamSessionState::Negotiating;
-    sync_snapshot(&snapshot, shared_snapshot.clone());
-
-    let hello = HelloMessage::new(
-        session_id.clone(),
-        sender_name,
-        stream_config.clone(),
-        config.quality,
-        config.target_latency_ms,
-        config.heartbeat_interval_ms,
-    );
-    shared_snapshot.metrics.bytes_sent +=
-        write_message(&mut stream, FrameKind::Hello, &hello, &[])? as u64;
-
-    let accept_frame = read_frame(&mut stream)?;
-    shared_snapshot.metrics.bytes_received += accept_frame.wire_bytes as u64;
-    shared_snapshot.metrics.packets_received += 1;
-    if accept_frame.kind != FrameKind::Accept {
-        return Err(TransportError::Negotiation(
-            "receiver did not respond with Accept".to_string(),
-        ));
-    }
-
-    let accept: AcceptMessage = decode_metadata(&accept_frame)?;
-    validate_accept(&accept, &session_id, &stream_config)?;
-    shared_snapshot.session_id = Some(session_id.clone());
-    shared_snapshot.codec = Some(accept.codec);
-    shared_snapshot.stream = Some(accept.stream.clone());
-    shared_snapshot.state = StreamSessionState::Streaming;
-    shared_snapshot.last_error = None;
-
-    let network_queue_packets =
-        branch_queue_capacity(accept.stream.packet_duration(), config.target_latency_ms);
-    let local_mirror_queue_packets = branch_queue_capacity(
-        accept.stream.packet_duration(),
-        capture_settings.target_latency_ms,
-    );
-    let mut network_branch = NetworkBranch::new(
-        stream.try_clone().map_err(|source| TransportError::Io {
-            context: format!("cloning TCP stream for {}", target.endpoint.address),
-            source,
-        })?,
-        network_queue_packets,
-    );
-    let mut local_mirror_branch =
-        LocalMirrorBranch::new(Arc::clone(&playback_engine), local_mirror_queue_packets);
-    shared_snapshot.network_buffer = network_branch.snapshot();
-    shared_snapshot.local_mirror.buffer = local_mirror_branch.snapshot();
-    if shared_snapshot.local_mirror.desired_enabled {
-        shared_snapshot.local_mirror.state = LocalMirrorState::Starting;
-        local_mirror_branch.start(local_mirror_request.clone())?;
-    }
-    sync_snapshot(&snapshot, shared_snapshot.clone());
-
-    let read_stream = stream.try_clone().map_err(|source| TransportError::Io {
-        context: format!("cloning TCP stream for {}", target.endpoint.address),
-        source,
-    })?;
-    let (inbound_tx, inbound_rx) = flume::unbounded();
-    let reader = thread::spawn(move || sender_reader_loop(read_stream, inbound_tx));
-
-    let mut capture = backend.start_capture(capture_settings)?;
-    let started_at = Instant::now();
-    let mut last_sequence = None::<u64>;
-    let mut heartbeat_nonce = 0_u64;
-    let mut pending_heartbeats = HashMap::<u64, Instant>::new();
-    let mut last_heartbeat = Instant::now();
-    let mut stopping = false;
-
-    loop {
-        let mut should_break = false;
-
-        match control_rx.try_recv() {
-            Ok(SenderCommand::Stop) => {
-                shared_snapshot.state = StreamSessionState::Stopping;
-                sync_snapshot(&snapshot, shared_snapshot.clone());
-                let _ = network_branch.send_stop("sender requested stop");
-                stopping = true;
-                should_break = true;
-            }
-            Ok(SenderCommand::SetLocalMirrorEnabled(enabled)) => {
-                shared_snapshot.local_mirror.desired_enabled = enabled;
-                shared_snapshot.local_mirror.last_error = None;
-                if enabled {
-                    shared_snapshot.local_mirror.state = LocalMirrorState::Starting;
-                    local_mirror_branch.start(local_mirror_request.clone())?;
-                    tracing::info!("local playback mirror enabled for active sender session");
-                } else {
-                    shared_snapshot.local_mirror.state = LocalMirrorState::Stopping;
-                    local_mirror_branch.stop()?;
-                    tracing::info!("local playback mirror disabled for active sender session");
+        let mut stream =
+            TcpStream::connect_timeout(&target.endpoint.address, request.connect_timeout)
+                .map_err(|source| {
+                    snapshot.state = StreamSessionState::Error;
+                    snapshot.health = StreamTargetHealth::Unreachable;
+                    snapshot.last_error = Some(
+                        TransportError::Connect {
+                            address: target.endpoint.address.to_string(),
+                            source,
+                        }
+                        .to_string(),
+                    );
+                    snapshot.clone()
+                })?;
+        stream.set_nodelay(true).map_err(|source| {
+            snapshot.state = StreamSessionState::Error;
+            snapshot.health = StreamTargetHealth::Error;
+            snapshot.last_error = Some(
+                TransportError::Io {
+                    context: format!("enabling TCP_NODELAY for {}", target.endpoint.address),
+                    source,
                 }
-            }
-            Err(TryRecvError::Disconnected) => {
-                stopping = true;
-                should_break = true;
-            }
-            Err(TryRecvError::Empty) => {}
+                .to_string(),
+            );
+            snapshot.clone()
+        })?;
+
+        snapshot.state = StreamSessionState::Negotiating;
+
+        let hello = HelloMessage::new(
+            session_id.clone(),
+            request.sender_name.clone(),
+            request.stream_config.clone(),
+            request.quality,
+            request.target_latency_ms,
+            request.heartbeat_interval_ms,
+        );
+        snapshot.metrics.bytes_sent += write_message(&mut stream, FrameKind::Hello, &hello, &[])
+            .map_err(|error| {
+                snapshot.state = StreamSessionState::Error;
+                snapshot.health = StreamTargetHealth::Error;
+                snapshot.last_error = Some(error.to_string());
+                snapshot.clone()
+            })? as u64;
+
+        let accept_frame = read_frame(&mut stream).map_err(|error| {
+            snapshot.state = StreamSessionState::Error;
+            snapshot.health = StreamTargetHealth::Unreachable;
+            snapshot.last_error = Some(error.to_string());
+            snapshot.clone()
+        })?;
+        snapshot.metrics.bytes_received += accept_frame.wire_bytes as u64;
+        snapshot.metrics.packets_received += 1;
+        if accept_frame.kind != FrameKind::Accept {
+            snapshot.state = StreamSessionState::Error;
+            snapshot.health = StreamTargetHealth::Error;
+            snapshot.last_error = Some("receiver did not respond with Accept".to_string());
+            return Err(snapshot);
         }
 
-        while let Ok(inbound) = inbound_rx.try_recv() {
+        let accept: AcceptMessage = decode_metadata(&accept_frame).map_err(|error| {
+            snapshot.state = StreamSessionState::Error;
+            snapshot.health = StreamTargetHealth::Error;
+            snapshot.last_error = Some(error.to_string());
+            snapshot.clone()
+        })?;
+        validate_accept(&accept, &session_id, &request.stream_config).map_err(|error| {
+            snapshot.state = StreamSessionState::Error;
+            snapshot.health = StreamTargetHealth::Error;
+            snapshot.last_error = Some(error.to_string());
+            snapshot.clone()
+        })?;
+
+        snapshot.session_id = Some(session_id);
+        snapshot.codec = Some(accept.codec);
+        snapshot.stream = Some(accept.stream.clone());
+        snapshot.state = StreamSessionState::Streaming;
+        snapshot.health = StreamTargetHealth::Healthy;
+        snapshot.last_error = None;
+
+        let queue_capacity =
+            branch_queue_capacity(accept.stream.packet_duration(), request.target_latency_ms);
+        let network_branch = NetworkBranch::new(
+            stream.try_clone().map_err(|source| {
+                snapshot.state = StreamSessionState::Error;
+                snapshot.health = StreamTargetHealth::Error;
+                snapshot.last_error = Some(
+                    TransportError::Io {
+                        context: format!("cloning TCP stream for {}", target.endpoint.address),
+                        source,
+                    }
+                    .to_string(),
+                );
+                snapshot.clone()
+            })?,
+            queue_capacity,
+        );
+        snapshot.network_buffer = network_branch.snapshot();
+
+        let read_stream = stream.try_clone().map_err(|source| {
+            snapshot.state = StreamSessionState::Error;
+            snapshot.health = StreamTargetHealth::Error;
+            snapshot.last_error = Some(
+                TransportError::Io {
+                    context: format!("cloning TCP stream for {}", target.endpoint.address),
+                    source,
+                }
+                .to_string(),
+            );
+            snapshot.clone()
+        })?;
+        let (inbound_tx, inbound_rx) = flume::unbounded();
+        let reader = thread::spawn(move || sender_reader_loop(read_stream, inbound_tx));
+
+        Ok(Self {
+            target,
+            snapshot,
+            stream,
+            network_branch,
+            inbound_rx,
+            reader: Some(reader),
+            pending_heartbeats: HashMap::new(),
+            heartbeat_nonce: 0,
+            last_heartbeat: Instant::now(),
+            started_at: Instant::now(),
+        })
+    }
+
+    fn tick(&mut self, heartbeat_interval: Duration) -> bool {
+        while let Ok(inbound) = self.inbound_rx.try_recv() {
             match inbound {
                 InboundControl::HeartbeatAck { nonce, wire_bytes } => {
-                    shared_snapshot.metrics.bytes_received += wire_bytes;
-                    shared_snapshot.metrics.packets_received += 1;
-                    shared_snapshot.metrics.keepalives_received += 1;
-                    if let Some(sent_at) = pending_heartbeats.remove(&nonce) {
-                        shared_snapshot.metrics.latency_estimate_ms =
+                    self.snapshot.metrics.bytes_received += wire_bytes;
+                    self.snapshot.metrics.packets_received += 1;
+                    self.snapshot.metrics.keepalives_received += 1;
+                    if let Some(sent_at) = self.pending_heartbeats.remove(&nonce) {
+                        self.snapshot.metrics.latency_estimate_ms =
                             Some((sent_at.elapsed().as_millis() / 2) as u32);
                     }
                 }
                 InboundControl::Stop { reason, wire_bytes } => {
-                    shared_snapshot.metrics.bytes_received += wire_bytes;
-                    shared_snapshot.metrics.packets_received += 1;
-                    shared_snapshot.last_error = Some(reason);
-                    shared_snapshot.state = StreamSessionState::Idle;
-                    should_break = true;
-                    stopping = true;
+                    self.snapshot.metrics.bytes_received += wire_bytes;
+                    self.snapshot.metrics.packets_received += 1;
+                    self.set_error(
+                        format!("receiver requested stop: {reason}"),
+                        StreamTargetHealth::Unreachable,
+                    );
                 }
                 InboundControl::Error { message, wire_bytes } => {
-                    shared_snapshot.metrics.bytes_received += wire_bytes;
-                    shared_snapshot.metrics.packets_received += 1;
-                    shared_snapshot.last_error = Some(message);
-                    shared_snapshot.state = StreamSessionState::Error;
-                    should_break = true;
+                    self.snapshot.metrics.bytes_received += wire_bytes;
+                    self.snapshot.metrics.packets_received += 1;
+                    self.set_error(message, StreamTargetHealth::Error);
                 }
                 InboundControl::Disconnected => {
-                    shared_snapshot.last_error =
-                        Some("receiver disconnected unexpectedly".to_string());
-                    shared_snapshot.state = StreamSessionState::Error;
-                    should_break = true;
+                    self.set_error(
+                        "receiver disconnected unexpectedly".to_string(),
+                        StreamTargetHealth::Unreachable,
+                    );
                 }
             }
         }
 
-        for event in network_branch.drain_events() {
+        for event in self.network_branch.drain_events() {
             match event {
                 NetworkEvent::AudioSent { wire_bytes } => {
-                    shared_snapshot.metrics.bytes_sent += wire_bytes;
-                    shared_snapshot.metrics.packets_sent += 1;
-                    shared_snapshot.metrics.estimated_bitrate_bps =
-                        bitrate_bps(shared_snapshot.metrics.bytes_sent, started_at.elapsed());
+                    self.snapshot.metrics.bytes_sent += wire_bytes;
+                    self.snapshot.metrics.packets_sent += 1;
+                    self.snapshot.metrics.estimated_bitrate_bps =
+                        bitrate_bps(self.snapshot.metrics.bytes_sent, self.started_at.elapsed());
                 }
                 NetworkEvent::HeartbeatSent { wire_bytes } => {
-                    shared_snapshot.metrics.bytes_sent += wire_bytes;
-                    shared_snapshot.metrics.keepalives_sent += 1;
+                    self.snapshot.metrics.bytes_sent += wire_bytes;
+                    self.snapshot.metrics.keepalives_sent += 1;
                 }
                 NetworkEvent::StopSent { wire_bytes } => {
-                    shared_snapshot.metrics.bytes_sent += wire_bytes;
+                    self.snapshot.metrics.bytes_sent += wire_bytes;
                 }
                 NetworkEvent::Error(message) => {
-                    shared_snapshot.last_error = Some(message);
-                    shared_snapshot.state = StreamSessionState::Error;
-                    should_break = true;
+                    self.set_error(message, StreamTargetHealth::Unreachable);
                 }
             }
         }
 
-        for event in local_mirror_branch.drain_events() {
+        if self.snapshot.state == StreamSessionState::Streaming
+            && self.last_heartbeat.elapsed() >= heartbeat_interval
+        {
+            self.heartbeat_nonce += 1;
+            self.pending_heartbeats
+                .insert(self.heartbeat_nonce, Instant::now());
+            if let Err(error) = self.network_branch.send_heartbeat(self.heartbeat_nonce) {
+                self.set_error(error.to_string(), StreamTargetHealth::Unreachable);
+            } else {
+                self.last_heartbeat = Instant::now();
+            }
+        }
+
+        self.snapshot.network_buffer = self.network_branch.snapshot();
+        self.refresh_health();
+        self.snapshot.state == StreamSessionState::Streaming
+    }
+
+    fn push_frame(&mut self, frame: FanoutAudioFrame) -> Result<(), TransportError> {
+        handle_buffer_push(
+            self.network_branch.push_frame(frame),
+            &format!("target {}", self.target.receiver_id),
+            &mut self.snapshot.network_buffer,
+        )?;
+        self.snapshot.network_buffer = self.network_branch.snapshot();
+        self.refresh_health();
+        Ok(())
+    }
+
+    fn shutdown_with_stop(mut self, reason: &str) -> StreamTargetSnapshot {
+        self.snapshot.state = StreamSessionState::Stopping;
+        let _ = self.network_branch.stop_and_shutdown(reason.to_string());
+        let _ = self.stream.shutdown(Shutdown::Both);
+        if let Some(reader) = self.reader.take() {
+            let _ = reader.join();
+        }
+        self.snapshot.network_buffer = self.network_branch.snapshot();
+        self.snapshot
+    }
+
+    fn shutdown_immediate(mut self) -> StreamTargetSnapshot {
+        let _ = self.network_branch.shutdown();
+        let _ = self.stream.shutdown(Shutdown::Both);
+        if let Some(reader) = self.reader.take() {
+            let _ = reader.join();
+        }
+        self.snapshot.network_buffer = self.network_branch.snapshot();
+        self.snapshot
+    }
+
+    fn snapshot(&self) -> StreamTargetSnapshot {
+        self.snapshot.clone()
+    }
+
+    fn set_error(&mut self, message: String, health: StreamTargetHealth) {
+        self.snapshot.last_error = Some(message);
+        self.snapshot.state = StreamSessionState::Error;
+        self.snapshot.health = health;
+    }
+
+    fn refresh_health(&mut self) {
+        if self.snapshot.state != StreamSessionState::Streaming {
+            return;
+        }
+
+        self.snapshot.health = if self.snapshot.network_buffer.dropped_packets > 0
+            || self.snapshot.metrics.packet_gaps > 0
+        {
+            StreamTargetHealth::Degraded
+        } else {
+            StreamTargetHealth::Healthy
+        };
+    }
+}
+
+enum TargetSessionEntry {
+    Pending(StreamTargetSnapshot),
+    Active(ManagedTargetSession),
+    Failed(StreamTargetSnapshot),
+}
+
+impl TargetSessionEntry {
+    fn snapshot(&self) -> StreamTargetSnapshot {
+        match self {
+            Self::Pending(snapshot) | Self::Failed(snapshot) => snapshot.clone(),
+            Self::Active(session) => session.snapshot(),
+        }
+    }
+
+    fn state(&self) -> StreamSessionState {
+        match self {
+            Self::Pending(snapshot) | Self::Failed(snapshot) => snapshot.state,
+            Self::Active(session) => session.snapshot.state,
+        }
+    }
+}
+
+struct TargetSessionCollection {
+    entries: HashMap<DeviceId, TargetSessionEntry>,
+}
+
+impl TargetSessionCollection {
+    fn new() -> Self {
+        Self {
+            entries: HashMap::new(),
+        }
+    }
+
+    fn insert_pending(&mut self, snapshot: StreamTargetSnapshot) {
+        self.entries.insert(
+            snapshot.receiver_id.clone(),
+            TargetSessionEntry::Pending(snapshot),
+        );
+    }
+
+    fn insert_active(&mut self, session: ManagedTargetSession) {
+        self.entries.insert(
+            session.target.receiver_id.clone(),
+            TargetSessionEntry::Active(session),
+        );
+    }
+
+    fn insert_failed(&mut self, snapshot: StreamTargetSnapshot) {
+        self.entries.insert(
+            snapshot.receiver_id.clone(),
+            TargetSessionEntry::Failed(snapshot),
+        );
+    }
+
+    fn remove(&mut self, device_id: &DeviceId) -> Option<TargetSessionEntry> {
+        self.entries.remove(device_id)
+    }
+
+    fn contains(&self, device_id: &DeviceId) -> bool {
+        self.entries.contains_key(device_id)
+    }
+
+    fn state_for(&self, device_id: &DeviceId) -> Option<StreamSessionState> {
+        self.entries.get(device_id).map(TargetSessionEntry::state)
+    }
+
+    fn has_active_targets(&self) -> bool {
+        self.entries
+            .values()
+            .any(|entry| matches!(entry, TargetSessionEntry::Active(_)))
+    }
+
+    fn has_pending_targets(&self) -> bool {
+        self.entries
+            .values()
+            .any(|entry| matches!(entry, TargetSessionEntry::Pending(_)))
+    }
+
+    fn active_ids(&self) -> Vec<DeviceId> {
+        self.entries
+            .iter()
+            .filter_map(|(device_id, entry)| {
+                if matches!(entry, TargetSessionEntry::Active(_)) {
+                    Some(device_id.clone())
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    fn active_mut(&mut self, device_id: &DeviceId) -> Option<&mut ManagedTargetSession> {
+        match self.entries.get_mut(device_id) {
+            Some(TargetSessionEntry::Active(session)) => Some(session),
+            _ => None,
+        }
+    }
+
+    fn collect_snapshots(&self) -> Vec<StreamTargetSnapshot> {
+        let mut snapshots = self
+            .entries
+            .values()
+            .map(TargetSessionEntry::snapshot)
+            .collect::<Vec<_>>();
+        snapshots.sort_by(|left, right| {
+            left.receiver_name
+                .cmp(&right.receiver_name)
+                .then_with(|| left.receiver_id.as_str().cmp(right.receiver_id.as_str()))
+        });
+        snapshots
+    }
+}
+
+struct TargetConnectRequest {
+    manager_session_id: String,
+    sender_name: String,
+    stream_config: ReceiverStreamConfig,
+    connect_timeout: Duration,
+    quality: synchrosonic_core::QualityPreset,
+    target_latency_ms: u16,
+    heartbeat_interval_ms: u16,
+}
+
+enum TargetConnectResult {
+    Connected(ManagedTargetSession),
+    Failed(StreamTargetSnapshot),
+}
+
+struct SenderManager<B> {
+    backend: B,
+    config: TransportConfig,
+    capture_settings: CaptureSettings,
+    manager_session_id: String,
+    local_mirror_request: PlaybackStartRequest,
+    local_mirror_branch: LocalMirrorBranch,
+    capture: Option<Box<dyn AudioCapture>>,
+    snapshot: Arc<Mutex<StreamSessionSnapshot>>,
+    shared_snapshot: StreamSessionSnapshot,
+    control_rx: Receiver<SenderCommand>,
+    connect_tx: Sender<TargetConnectResult>,
+    connect_rx: Receiver<TargetConnectResult>,
+    connect_request: TargetConnectRequest,
+    targets: TargetSessionCollection,
+}
+
+impl<B> SenderManager<B>
+where
+    B: AudioBackend + Send + Sync + 'static,
+{
+    fn new(
+        backend: B,
+        playback_engine: Arc<dyn PlaybackEngine>,
+        config: TransportConfig,
+        capture_settings: CaptureSettings,
+        sender_name: String,
+        manager_session_id: String,
+        snapshot: Arc<Mutex<StreamSessionSnapshot>>,
+        control_rx: Receiver<SenderCommand>,
+    ) -> Self {
+        let stream_config = receiver_stream_config(&capture_settings);
+        let local_mirror_request = PlaybackStartRequest {
+            stream: stream_config.clone(),
+            target_id: None,
+            latency_ms: capture_settings.target_latency_ms,
+        };
+        let local_mirror_branch = LocalMirrorBranch::new(
+            Arc::clone(&playback_engine),
+            branch_queue_capacity(
+                stream_config.packet_duration(),
+                capture_settings.target_latency_ms,
+            ),
+        );
+        let (connect_tx, connect_rx) = flume::unbounded();
+        let connect_request = TargetConnectRequest {
+            manager_session_id: manager_session_id.clone(),
+            sender_name,
+            stream_config: stream_config.clone(),
+            connect_timeout: Duration::from_millis(config.connect_timeout_ms.max(250) as u64),
+            quality: config.quality,
+            target_latency_ms: config.target_latency_ms,
+            heartbeat_interval_ms: config.heartbeat_interval_ms,
+        };
+
+        let mut shared_snapshot = StreamSessionSnapshot::default();
+        shared_snapshot.session_id = Some(manager_session_id);
+        shared_snapshot.stream = Some(stream_config.clone());
+        shared_snapshot.local_mirror.desired_enabled = capture_settings.outputs.local_monitoring;
+        shared_snapshot.local_mirror.state = if capture_settings.outputs.local_monitoring {
+            LocalMirrorState::Idle
+        } else {
+            LocalMirrorState::Disabled
+        };
+        shared_snapshot.local_mirror.playback_backend =
+            Some(playback_engine.backend_name().to_string());
+
+        Self {
+            backend,
+            config,
+            capture_settings,
+            manager_session_id: shared_snapshot
+                .session_id
+                .clone()
+                .unwrap_or_else(|| "sender-session".to_string()),
+            local_mirror_request,
+            local_mirror_branch,
+            capture: None,
+            snapshot,
+            shared_snapshot,
+            control_rx,
+            connect_tx,
+            connect_rx,
+            connect_request,
+            targets: TargetSessionCollection::new(),
+        }
+    }
+
+    fn run(&mut self) {
+        loop {
+            if self.process_commands() {
+                break;
+            }
+
+            self.process_connect_results();
+            self.process_local_mirror_events();
+            self.tick_targets();
+            self.capture_and_fan_out();
+            self.stop_capture_if_idle();
+            self.refresh_snapshot();
+
+            thread::sleep(BRANCH_IDLE_POLL_INTERVAL);
+        }
+
+        self.shutdown_all();
+    }
+
+    fn queue_target_connect(&mut self, target: SenderTarget) {
+        let target_id = target.receiver_id.clone();
+        if matches!(
+            self.targets.state_for(&target_id),
+            Some(StreamSessionState::Connecting)
+                | Some(StreamSessionState::Negotiating)
+                | Some(StreamSessionState::Streaming)
+        ) {
+            return;
+        }
+
+        let pending_snapshot = pending_target_snapshot(&target);
+        self.targets.insert_pending(pending_snapshot);
+        let connect_request = self.connect_request.clone();
+        let connect_tx = self.connect_tx.clone();
+        tracing::info!(
+            receiver_id = %target.receiver_id,
+            endpoint = %target.endpoint.address,
+            "queueing multi-device sender target connection"
+        );
+        thread::spawn(move || {
+            let result = ManagedTargetSession::connect(target, &connect_request);
+            let _ = match result {
+                Ok(session) => connect_tx.send(TargetConnectResult::Connected(session)),
+                Err(snapshot) => connect_tx.send(TargetConnectResult::Failed(snapshot)),
+            };
+        });
+    }
+
+    fn process_commands(&mut self) -> bool {
+        while let Ok(command) = self.control_rx.try_recv() {
+            match command {
+                SenderCommand::AddTarget(target) => {
+                    self.queue_target_connect(target);
+                }
+                SenderCommand::RemoveTarget(device_id) => {
+                    tracing::info!(receiver_id = %device_id, "removing sender target");
+                    if let Some(entry) = self.targets.remove(&device_id) {
+                        if let TargetSessionEntry::Active(session) = entry {
+                            let _ = session.shutdown_with_stop("sender removed target");
+                        }
+                    }
+                }
+                SenderCommand::SetLocalMirrorEnabled(enabled) => {
+                    self.shared_snapshot.local_mirror.desired_enabled = enabled;
+                    self.shared_snapshot.local_mirror.last_error = None;
+                    if self.capture.is_some() {
+                        if enabled {
+                            self.shared_snapshot.local_mirror.state = LocalMirrorState::Starting;
+                            if let Err(error) =
+                                self.local_mirror_branch.start(self.local_mirror_request.clone())
+                            {
+                                self.shared_snapshot.local_mirror.state = LocalMirrorState::Error;
+                                self.shared_snapshot.local_mirror.last_error =
+                                    Some(error.to_string());
+                            }
+                        } else {
+                            self.shared_snapshot.local_mirror.state = LocalMirrorState::Stopping;
+                            if let Err(error) = self.local_mirror_branch.stop() {
+                                self.shared_snapshot.local_mirror.state = LocalMirrorState::Error;
+                                self.shared_snapshot.local_mirror.last_error =
+                                    Some(error.to_string());
+                            }
+                        }
+                    }
+                }
+                SenderCommand::Shutdown => {
+                    self.shared_snapshot.state = StreamSessionState::Stopping;
+                    return true;
+                }
+            }
+        }
+
+        false
+    }
+
+    fn process_connect_results(&mut self) {
+        while let Ok(result) = self.connect_rx.try_recv() {
+            match result {
+                TargetConnectResult::Connected(session) => {
+                    let device_id = session.target.receiver_id.clone();
+                    if !self.targets.contains(&device_id) {
+                        let _ = session.shutdown_with_stop("sender target was removed before activation");
+                        continue;
+                    }
+
+                    tracing::info!(
+                        receiver_id = %device_id,
+                        receiver_name = %session.target.receiver_name,
+                        endpoint = %session.target.endpoint.address,
+                        "sender target connected"
+                    );
+                    self.targets.insert_active(session);
+                    if let Err(error) = self.ensure_capture_running() {
+                        self.shared_snapshot.last_error = Some(error.to_string());
+                        self.fail_all_active_targets(error.to_string());
+                    }
+                }
+                TargetConnectResult::Failed(snapshot) => {
+                    if !self.targets.contains(&snapshot.receiver_id) {
+                        continue;
+                    }
+
+                    tracing::warn!(
+                        receiver_id = %snapshot.receiver_id,
+                        error = %snapshot.last_error.as_deref().unwrap_or("unknown connection error"),
+                        "sender target connection failed"
+                    );
+                    self.shared_snapshot.last_error = snapshot.last_error.clone();
+                    self.targets.insert_failed(snapshot);
+                }
+            }
+        }
+    }
+
+    fn process_local_mirror_events(&mut self) {
+        for event in self.local_mirror_branch.drain_events() {
             match event {
                 LocalMirrorEvent::Started {
                     backend_name,
                     target_id,
                 } => {
-                    shared_snapshot.local_mirror.playback_backend = Some(backend_name);
-                    shared_snapshot.local_mirror.playback_target_id = target_id;
-                    shared_snapshot.local_mirror.state = LocalMirrorState::Mirroring;
-                    shared_snapshot.local_mirror.last_error = None;
+                    self.shared_snapshot.local_mirror.playback_backend = Some(backend_name);
+                    self.shared_snapshot.local_mirror.playback_target_id = target_id;
+                    self.shared_snapshot.local_mirror.state = LocalMirrorState::Mirroring;
+                    self.shared_snapshot.local_mirror.last_error = None;
                 }
                 LocalMirrorEvent::Played { bytes } => {
-                    shared_snapshot.local_mirror.packets_played += 1;
-                    shared_snapshot.local_mirror.bytes_played += bytes as u64;
+                    self.shared_snapshot.local_mirror.packets_played += 1;
+                    self.shared_snapshot.local_mirror.bytes_played += bytes as u64;
                 }
                 LocalMirrorEvent::StateChanged(state) => {
-                    shared_snapshot.local_mirror.state = state;
+                    self.shared_snapshot.local_mirror.state = state;
                 }
                 LocalMirrorEvent::Error(message) => {
-                    shared_snapshot.local_mirror.last_error = Some(message.clone());
-                    shared_snapshot.local_mirror.state = LocalMirrorState::Error;
                     tracing::warn!(error = %message, "local playback mirror reported an error");
+                    self.shared_snapshot.local_mirror.last_error = Some(message);
+                    self.shared_snapshot.local_mirror.state = LocalMirrorState::Error;
                 }
             }
         }
+    }
 
-        if should_break {
-            break;
+    fn tick_targets(&mut self) {
+        let heartbeat_interval =
+            Duration::from_millis(self.config.heartbeat_interval_ms.max(250) as u64);
+        let mut failed_targets = Vec::new();
+
+        for device_id in self.targets.active_ids() {
+            let still_streaming = match self.targets.active_mut(&device_id) {
+                Some(session) => session.tick(heartbeat_interval),
+                None => continue,
+            };
+            if !still_streaming {
+                failed_targets.push(device_id);
+            }
         }
+
+        for device_id in failed_targets {
+            if let Some(TargetSessionEntry::Active(session)) = self.targets.remove(&device_id) {
+                let snapshot = session.shutdown_immediate();
+                self.shared_snapshot.last_error = snapshot.last_error.clone();
+                self.targets.insert_failed(snapshot);
+            }
+        }
+    }
+
+    fn capture_and_fan_out(&mut self) {
+        let Some(capture) = self.capture.as_mut() else {
+            return;
+        };
 
         match capture.try_recv_frame() {
             Ok(Some(frame)) => {
-                if let Some(previous) = last_sequence {
-                    if frame.sequence > previous + 1 {
-                        shared_snapshot.metrics.packet_gaps += frame.sequence - previous - 1;
-                    }
-                }
-                last_sequence = Some(frame.sequence);
-
-                let branch_frame = FanoutAudioFrame {
+                let base_frame = FanoutAudioFrame {
                     sequence: frame.sequence,
                     captured_at_ms: frame.captured_at.as_millis() as u64,
                     payload: frame.payload,
                 };
-                let local_mirror_frame = branch_frame.clone();
 
-                handle_buffer_push(
-                    network_branch.push_frame(branch_frame),
-                    "network sender",
-                    &mut shared_snapshot.network_buffer,
-                )?;
-
-                if shared_snapshot.local_mirror.desired_enabled
+                if self.shared_snapshot.local_mirror.desired_enabled
                     && matches!(
-                        shared_snapshot.local_mirror.state,
+                        self.shared_snapshot.local_mirror.state,
                         LocalMirrorState::Starting | LocalMirrorState::Mirroring
                     )
                 {
-                    handle_buffer_push(
-                        local_mirror_branch.push_frame(local_mirror_frame),
+                    let _ = handle_buffer_push(
+                        self.local_mirror_branch.push_frame(base_frame.clone()),
                         "local playback mirror",
-                        &mut shared_snapshot.local_mirror.buffer,
-                    )?;
+                        &mut self.shared_snapshot.local_mirror.buffer,
+                    );
+                }
+
+                let mut failed_targets = Vec::new();
+                for device_id in self.targets.active_ids() {
+                    let push_result = match self.targets.active_mut(&device_id) {
+                        Some(session) => session.push_frame(base_frame.clone()),
+                        None => continue,
+                    };
+
+                    if let Err(error) = push_result {
+                        if let Some(session) = self.targets.active_mut(&device_id) {
+                            session.set_error(error.to_string(), StreamTargetHealth::Error);
+                        }
+                        failed_targets.push(device_id);
+                    }
+                }
+
+                for device_id in failed_targets {
+                    if let Some(TargetSessionEntry::Active(session)) = self.targets.remove(&device_id)
+                    {
+                        let snapshot = session.shutdown_immediate();
+                        self.shared_snapshot.last_error = snapshot.last_error.clone();
+                        self.targets.insert_failed(snapshot);
+                    }
                 }
             }
             Ok(None) => {}
             Err(AudioError::CaptureEnded) => {
-                shared_snapshot.last_error = Some("capture stream ended".to_string());
-                shared_snapshot.state = StreamSessionState::Error;
-                break;
+                self.shared_snapshot.last_error = Some("capture stream ended".to_string());
+                self.fail_all_active_targets("capture stream ended".to_string());
             }
-            Err(error) => return Err(error.into()),
-        }
-
-        if last_heartbeat.elapsed() >= heartbeat_interval {
-            heartbeat_nonce += 1;
-            pending_heartbeats.insert(heartbeat_nonce, Instant::now());
-            network_branch.send_heartbeat(heartbeat_nonce)?;
-            last_heartbeat = Instant::now();
-        }
-
-        shared_snapshot.network_buffer = network_branch.snapshot();
-        shared_snapshot.local_mirror.buffer = local_mirror_branch.snapshot();
-        sync_snapshot(&snapshot, shared_snapshot.clone());
-
-        if !stopping {
-            thread::sleep(BRANCH_IDLE_POLL_INTERVAL);
+            Err(error) => {
+                self.shared_snapshot.last_error = Some(error.to_string());
+                self.fail_all_active_targets(error.to_string());
+            }
         }
     }
 
-    let _ = capture.stop();
-    let _ = network_branch.shutdown();
-    let _ = local_mirror_branch.shutdown();
-    let _ = stream.shutdown(Shutdown::Both);
-    let _ = reader.join();
+    fn ensure_capture_running(&mut self) -> Result<(), TransportError> {
+        if self.capture.is_some() {
+            return Ok(());
+        }
 
-    if shared_snapshot.state != StreamSessionState::Error {
-        shared_snapshot.state = StreamSessionState::Idle;
+        let capture = self.backend.start_capture(self.capture_settings.clone())?;
+        self.capture = Some(capture);
+        tracing::info!(
+            manager_session_id = %self.manager_session_id,
+            "multi-device sender capture started"
+        );
+
+        if self.shared_snapshot.local_mirror.desired_enabled {
+            self.shared_snapshot.local_mirror.state = LocalMirrorState::Starting;
+            self.local_mirror_branch
+                .start(self.local_mirror_request.clone())?;
+        }
+
+        Ok(())
     }
-    shared_snapshot.network_buffer = network_branch.snapshot();
-    shared_snapshot.local_mirror.buffer = local_mirror_branch.snapshot();
-    finalize_local_mirror_state(&mut shared_snapshot);
-    sync_snapshot(&snapshot, shared_snapshot);
 
-    Ok(())
+    fn stop_capture_if_idle(&mut self) {
+        if self.targets.has_active_targets() || self.targets.has_pending_targets() {
+            return;
+        }
+
+        if let Some(mut capture) = self.capture.take() {
+            let _ = capture.stop();
+        }
+
+        if matches!(
+            self.shared_snapshot.local_mirror.state,
+            LocalMirrorState::Starting | LocalMirrorState::Mirroring | LocalMirrorState::Stopping
+        ) {
+            let _ = self.local_mirror_branch.stop();
+        }
+    }
+
+    fn fail_all_active_targets(&mut self, message: String) {
+        let active_ids = self.targets.active_ids();
+        for device_id in active_ids {
+            if let Some(session) = self.targets.active_mut(&device_id) {
+                session.set_error(message.clone(), StreamTargetHealth::Error);
+            }
+        }
+    }
+
+    fn refresh_snapshot(&mut self) {
+        self.shared_snapshot.targets = self.targets.collect_snapshots();
+        self.shared_snapshot.metrics = aggregate_metrics(&self.shared_snapshot.targets);
+        self.shared_snapshot.state = derive_manager_state(&self.shared_snapshot.targets);
+        self.shared_snapshot.local_mirror.buffer = self.local_mirror_branch.snapshot();
+        finalize_local_mirror_state(
+            &mut self.shared_snapshot.local_mirror,
+            self.capture.is_some(),
+        );
+        sync_snapshot(&self.snapshot, self.shared_snapshot.clone());
+    }
+
+    fn shutdown_all(&mut self) {
+        if let Some(mut capture) = self.capture.take() {
+            let _ = capture.stop();
+        }
+
+        let device_ids = self.targets.active_ids();
+        for device_id in device_ids {
+            if let Some(TargetSessionEntry::Active(session)) = self.targets.remove(&device_id) {
+                let _ = session.shutdown_with_stop("sender session manager stopping");
+            }
+        }
+
+        self.targets.entries.clear();
+        let _ = self.local_mirror_branch.shutdown();
+        self.shared_snapshot.targets.clear();
+        self.shared_snapshot.metrics = StreamMetrics::default();
+        self.shared_snapshot.state = StreamSessionState::Idle;
+        self.shared_snapshot.last_error = None;
+        finalize_local_mirror_state(&mut self.shared_snapshot.local_mirror, false);
+        sync_snapshot(&self.snapshot, self.shared_snapshot.clone());
+    }
+}
+
+impl Clone for TargetConnectRequest {
+    fn clone(&self) -> Self {
+        Self {
+            manager_session_id: self.manager_session_id.clone(),
+            sender_name: self.sender_name.clone(),
+            stream_config: self.stream_config.clone(),
+            connect_timeout: self.connect_timeout,
+            quality: self.quality,
+            target_latency_ms: self.target_latency_ms,
+            heartbeat_interval_ms: self.heartbeat_interval_ms,
+        }
+    }
 }
 
 fn network_writer_loop(
@@ -796,7 +1348,7 @@ fn validate_accept(
             "receiver accepted a different session id".to_string(),
         ));
     }
-    if accept.codec != synchrosonic_core::StreamCodec::RawPcm {
+    if accept.codec != StreamCodec::RawPcm {
         return Err(TransportError::Negotiation(
             "receiver negotiated unsupported codec".to_string(),
         ));
@@ -808,6 +1360,68 @@ fn validate_accept(
     }
 
     Ok(())
+}
+
+fn pending_target_snapshot(target: &SenderTarget) -> StreamTargetSnapshot {
+    let mut snapshot = StreamTargetSnapshot::new(
+        target.receiver_id.clone(),
+        target.receiver_name.clone(),
+        target.endpoint.address,
+    );
+    snapshot.state = StreamSessionState::Connecting;
+    snapshot.health = StreamTargetHealth::Pending;
+    snapshot
+}
+
+fn receiver_stream_config(settings: &CaptureSettings) -> ReceiverStreamConfig {
+    ReceiverStreamConfig {
+        sample_rate_hz: settings.sample_rate_hz,
+        channels: settings.channels,
+        sample_format: settings.sample_format,
+        frames_per_packet: settings.buffer_frames,
+    }
+}
+
+fn aggregate_metrics(targets: &[StreamTargetSnapshot]) -> StreamMetrics {
+    let mut aggregate = StreamMetrics::default();
+    for target in targets {
+        aggregate.accumulate(&target.metrics);
+    }
+    aggregate
+}
+
+fn derive_manager_state(targets: &[StreamTargetSnapshot]) -> StreamSessionState {
+    if targets.is_empty() {
+        return StreamSessionState::Idle;
+    }
+    if targets
+        .iter()
+        .any(|target| target.state == StreamSessionState::Streaming)
+    {
+        return StreamSessionState::Streaming;
+    }
+    if targets.iter().any(|target| {
+        matches!(
+            target.state,
+            StreamSessionState::Connecting | StreamSessionState::Negotiating
+        )
+    }) {
+        return StreamSessionState::Connecting;
+    }
+    if targets
+        .iter()
+        .any(|target| target.state == StreamSessionState::Stopping)
+    {
+        return StreamSessionState::Stopping;
+    }
+    if targets
+        .iter()
+        .all(|target| target.state == StreamSessionState::Error)
+    {
+        return StreamSessionState::Error;
+    }
+
+    StreamSessionState::Idle
 }
 
 fn handle_buffer_push(
@@ -861,12 +1475,24 @@ fn div_ceil(dividend: usize, divisor: usize) -> usize {
     dividend.saturating_add(divisor.saturating_sub(1)) / divisor.max(1)
 }
 
-fn finalize_local_mirror_state(snapshot: &mut StreamSessionSnapshot) {
-    if snapshot.local_mirror.state == LocalMirrorState::Error {
+fn finalize_local_mirror_state(
+    snapshot: &mut synchrosonic_core::LocalMirrorSnapshot,
+    capture_active: bool,
+) {
+    if snapshot.state == LocalMirrorState::Error {
         return;
     }
 
-    snapshot.local_mirror.state = if snapshot.local_mirror.desired_enabled {
+    snapshot.state = if capture_active {
+        if snapshot.desired_enabled {
+            match snapshot.state {
+                LocalMirrorState::Mirroring | LocalMirrorState::Starting => snapshot.state,
+                _ => LocalMirrorState::Starting,
+            }
+        } else {
+            LocalMirrorState::Disabled
+        }
+    } else if snapshot.desired_enabled {
         LocalMirrorState::Idle
     } else {
         LocalMirrorState::Disabled

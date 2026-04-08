@@ -1,5 +1,6 @@
 use std::{
     cell::RefCell,
+    collections::HashMap,
     net::SocketAddr,
     rc::Rc,
     sync::{Arc, Mutex},
@@ -12,6 +13,7 @@ use synchrosonic_audio::LinuxAudioBackend;
 use synchrosonic_core::{
     services::{AudioBackend, DiscoveryService, ReceiverService},
     AppConfig, AppState, AudioSourceKind, DeviceId, DiagnosticEvent, DiscoveredDevice,
+    StreamTargetSnapshot,
 };
 use synchrosonic_discovery::MdnsDiscoveryService;
 use synchrosonic_receiver::ReceiverRuntime;
@@ -301,7 +303,7 @@ fn streaming_page(
     page.append(&heading);
 
     let summary = gtk::Label::new(Some(
-        "The sender uses one capture stream with an explicit fan-out: a bounded network queue feeds the TCP transport branch while an optional bounded local queue feeds sender-side playback. Each branch can lag or drop independently without blocking the other one.",
+        "The sender uses one capture stream with an explicit fan-out: each receiver gets its own bounded network branch, and an optional bounded local branch mirrors playback on the sender. Add or remove the selected receiver without collapsing the rest of the cast.",
     ));
     summary.set_wrap(true);
     summary.set_halign(Align::Start);
@@ -331,10 +333,12 @@ fn streaming_page(
     page.append(&mirror_row);
 
     let controls = gtk::Box::new(Orientation::Horizontal, 12);
-    let start_button = gtk::Button::with_label("Start Stream");
-    let stop_button = gtk::Button::with_label("Stop Stream");
+    let start_button = gtk::Button::with_label("Add Selected Target");
+    let stop_button = gtk::Button::with_label("Remove Selected Target");
+    let stop_all_button = gtk::Button::with_label("Stop All");
     controls.append(&start_button);
     controls.append(&stop_button);
+    controls.append(&stop_all_button);
     page.append(&controls);
 
     let status_label = gtk::Label::new(Some(&format_streaming_status(&state.borrow())));
@@ -437,14 +441,15 @@ fn streaming_page(
                     state.diagnostics.push(DiagnosticEvent::info(
                         "streaming",
                         format!(
-                            "Started LAN stream toward {} at {} with local mirror {}.",
+                            "Queued receiver target {} at {} with local mirror {}.",
                             snapshot
-                                .receiver_name
-                                .as_deref()
-                                .unwrap_or("receiver"),
-                            snapshot
+                                .target(&device.id)
+                                .map(|target| target.receiver_name.as_str())
+                                .unwrap_or(device.display_name.as_str()),
+                            device
                                 .endpoint
-                                .map(|endpoint| endpoint.to_string())
+                                .as_ref()
+                                .map(|endpoint| endpoint.address.to_string())
                                 .unwrap_or_else(|| "unknown endpoint".to_string()),
                             if snapshot.local_mirror.desired_enabled {
                                 "enabled"
@@ -472,14 +477,29 @@ fn streaming_page(
         let sender = Arc::clone(&sender);
         let status_label = status_label.clone();
         stop_button.connect_clicked(move |_| {
-            match sender.lock().expect("sender session mutex").stop() {
+            let selected_device_id = state.borrow().selected_receiver_device_id.clone();
+            let Some(device_id) = selected_device_id else {
+                let mut state = state.borrow_mut();
+                state.diagnostics.push(DiagnosticEvent::warning(
+                    "streaming",
+                    "Select a receiver target before trying to remove it from the cast.",
+                ));
+                status_label.set_text(&format_streaming_status(&state));
+                return;
+            };
+
+            match sender
+                .lock()
+                .expect("sender session mutex")
+                .stop_target(&device_id)
+            {
                 Ok(()) => {
                     let snapshot = sender.lock().expect("sender session mutex").snapshot();
                     let mut state = state.borrow_mut();
                     state.apply_streaming_snapshot(snapshot);
                     state.diagnostics.push(DiagnosticEvent::info(
                         "streaming",
-                        "Sender stream stopped and transport resources were released.",
+                        format!("Removed receiver target {} from the active cast.", device_id),
                     ));
                     status_label.set_text(&format_streaming_status(&state));
                 }
@@ -488,6 +508,34 @@ fn streaming_page(
                     state.diagnostics.push(DiagnosticEvent::error(
                         "streaming",
                         format!("Failed to stop stream: {error}"),
+                    ));
+                    status_label.set_text(&format_streaming_status(&state));
+                }
+            }
+        });
+    }
+
+    {
+        let state = Rc::clone(&state);
+        let sender = Arc::clone(&sender);
+        let status_label = status_label.clone();
+        stop_all_button.connect_clicked(move |_| {
+            match sender.lock().expect("sender session mutex").stop() {
+                Ok(()) => {
+                    let snapshot = sender.lock().expect("sender session mutex").snapshot();
+                    let mut state = state.borrow_mut();
+                    state.apply_streaming_snapshot(snapshot);
+                    state.diagnostics.push(DiagnosticEvent::info(
+                        "streaming",
+                        "Stopped the sender session manager and released all target transports.",
+                    ));
+                    status_label.set_text(&format_streaming_status(&state));
+                }
+                Err(error) => {
+                    let mut state = state.borrow_mut();
+                    state.diagnostics.push(DiagnosticEvent::error(
+                        "streaming",
+                        format!("Failed to stop all sender targets: {error}"),
                     ));
                     status_label.set_text(&format_streaming_status(&state));
                 }
@@ -751,46 +799,38 @@ fn start_streaming_poll(
 ) {
     glib::timeout_add_seconds_local(1, move || {
         let snapshot = sender.lock().expect("sender session mutex").snapshot();
-        let state_message = {
-            let state = state.borrow();
-            if state.streaming.state != snapshot.state {
-                Some(format!("Sender stream state is now {:?}", snapshot.state))
-            } else {
-                None
-            }
+        let previous_snapshot = state.borrow().streaming.clone();
+        let state_message = if previous_snapshot.state != snapshot.state {
+            Some(format!("Sender stream state is now {:?}", snapshot.state))
+        } else {
+            None
         };
-        let local_mirror_state_message = {
-            let state = state.borrow();
-            if state.streaming.local_mirror.state != snapshot.local_mirror.state {
+        let local_mirror_state_message =
+            if previous_snapshot.local_mirror.state != snapshot.local_mirror.state {
                 Some(format!(
                     "Local playback mirror is now {:?}",
                     snapshot.local_mirror.state
                 ))
             } else {
                 None
-            }
+            };
+        let error_message = if previous_snapshot.last_error != snapshot.last_error {
+            snapshot
+                .last_error
+                .as_ref()
+                .map(|error| format!("Sender stream reported: {error}"))
+        } else {
+            None
         };
-        let error_message = {
-            let state = state.borrow();
-            if state.streaming.last_error != snapshot.last_error {
-                snapshot
-                    .last_error
-                    .as_ref()
-                    .map(|error| format!("Sender stream reported: {error}"))
-            } else {
-                None
-            }
-        };
-        let local_mirror_error_message = {
-            let state = state.borrow();
-            if state.streaming.local_mirror.last_error != snapshot.local_mirror.last_error {
+        let local_mirror_error_message =
+            if previous_snapshot.local_mirror.last_error != snapshot.local_mirror.last_error {
                 snapshot.local_mirror.last_error.as_ref().map(|error| {
                     format!("Local playback mirror reported: {error}")
                 })
             } else {
                 None
-            }
-        };
+            };
+        let target_messages = stream_target_transition_messages(&previous_snapshot.targets, &snapshot.targets);
 
         {
             let mut state = state.borrow_mut();
@@ -814,6 +854,9 @@ fn start_streaming_poll(
                 state
                     .diagnostics
                     .push(DiagnosticEvent::warning("streaming", message));
+            }
+            for message in target_messages {
+                state.diagnostics.push(message);
             }
 
             streaming_status_label.set_text(&format_streaming_status(&state));
@@ -871,8 +914,9 @@ fn format_dashboard_status(
     audio_backend_name: &str,
     audio_source_summary: &str,
 ) -> String {
+    let healthy_targets = state.streaming.healthy_target_count();
     format!(
-        "Session: {:?}\nCapture: {:?}\nStreaming: {:?}\nSelected receiver: {}\nNetwork branch: {}% full ({} / {} packets, dropped={})\nLocal mirror: desired={} state={:?} buffer={}% ({} / {} packets, dropped={}) played packets={} bytes={} error={}\nSender metrics: packets sent={} bytes sent={} bitrate={}bps latency={:?}ms gaps={} keepalives={}/{}\nReceiver: {:?}\nReceiver buffer: {}% ({} / {} packets)\nReceiver metrics: packets in={} played={} underruns={} overruns={} reconnects={}\nAudio backend: {}\n{}\nDefault stream port: {}\nLocal playback default: {}",
+        "Session: {:?}\nCapture: {:?}\nStreaming: {:?}\nSelected receiver: {}\nTarget sessions: total={} healthy={}\nLocal mirror: desired={} state={:?} buffer={}% ({} / {} packets, dropped={}) played packets={} bytes={} error={}\nSender aggregate metrics: packets sent={} bytes sent={} bitrate={}bps latency={:?}ms gaps={} keepalives={}/{}\nReceiver: {:?}\nReceiver buffer: {}% ({} / {} packets)\nReceiver metrics: packets in={} played={} underruns={} overruns={} reconnects={}\nAudio backend: {}\n{}\nDefault stream port: {}\nLocal playback default: {}",
         state.cast_session,
         state.capture_state,
         state.streaming.state,
@@ -881,10 +925,8 @@ fn format_dashboard_status(
             .as_ref()
             .map(ToString::to_string)
             .unwrap_or_else(|| "none".to_string()),
-        state.streaming.network_buffer.fill_percent(),
-        state.streaming.network_buffer.queued_packets,
-        state.streaming.network_buffer.max_packets,
-        state.streaming.network_buffer.dropped_packets,
+        state.streaming.active_target_count(),
+        healthy_targets,
         state.streaming.local_mirror.desired_enabled,
         state.streaming.local_mirror.state,
         state.streaming.local_mirror.buffer.fill_percent(),
@@ -928,21 +970,12 @@ fn format_dashboard_status(
 
 fn format_streaming_status(state: &AppState) -> String {
     let stream = &state.streaming;
-    let network_buffer = &stream.network_buffer;
     let local_mirror = &stream.local_mirror;
     let selected_device = state
         .selected_receiver_device_id
         .as_ref()
         .map(ToString::to_string)
         .unwrap_or_else(|| "none".to_string());
-    let receiver = stream
-        .receiver_name
-        .as_deref()
-        .unwrap_or("none");
-    let endpoint = stream
-        .endpoint
-        .map(|endpoint| endpoint.to_string())
-        .unwrap_or_else(|| "unresolved".to_string());
     let stream_shape = stream
         .stream
         .as_ref()
@@ -957,23 +990,16 @@ fn format_streaming_status(state: &AppState) -> String {
         })
         .unwrap_or_else(|| "not negotiated".to_string());
     let last_error = stream.last_error.as_deref().unwrap_or("none");
+    let target_status = format_stream_target_statuses(&stream.targets);
 
     format!(
-        "State: {:?}\nSelected receiver id: {}\nNegotiated receiver: {}\nEndpoint: {}\nSession id: {}\nCodec: {}\nStream: {}\nNetwork branch: {}% full ({} / {} packets, dropped={})\nLocal mirror: desired={} state={:?} backend={} target={} buffer={}% ({} / {} packets, dropped={}) played packets={} bytes={} error={}\nMetrics: packets sent={} packets received={} bytes sent={} bytes received={} bitrate={}bps latency estimate={:?}ms packet gaps={} keepalives sent={} keepalives received={}\nLast error: {}\nSplit-stream path: PipeWire capture -> explicit branch fan-out -> [bounded network queue -> TCP framed transport -> receiver runtime -> PipeWire playback] + [bounded local mirror queue -> sender-side PipeWire playback].",
+        "State: {:?}\nSelected receiver id: {}\nSender session id: {}\nStream: {}\nActive target count: {}\nTargets:\n{}\nLocal mirror: desired={} state={:?} backend={} target={} buffer={}% ({} / {} packets, dropped={}) played packets={} bytes={} error={}\nAggregate metrics: packets sent={} packets received={} bytes sent={} bytes received={} bitrate={}bps latency estimate={:?}ms packet gaps={} keepalives sent={} keepalives received={}\nLast error: {}\nSplit-stream path: PipeWire capture -> explicit branch fan-out -> [per-target bounded network queue -> per-target TCP framed transport -> receiver runtime -> PipeWire playback] + [bounded local mirror queue -> sender-side PipeWire playback].",
         stream.state,
         selected_device,
-        receiver,
-        endpoint,
         stream.session_id.as_deref().unwrap_or("not started"),
-        stream
-            .codec
-            .map(|codec| format!("{codec:?}"))
-            .unwrap_or_else(|| "not negotiated".to_string()),
         stream_shape,
-        network_buffer.fill_percent(),
-        network_buffer.queued_packets,
-        network_buffer.max_packets,
-        network_buffer.dropped_packets,
+        stream.active_target_count(),
+        target_status,
         local_mirror.desired_enabled,
         local_mirror.state,
         local_mirror
@@ -1002,6 +1028,98 @@ fn format_streaming_status(state: &AppState) -> String {
         stream.metrics.keepalives_received,
         last_error
     )
+}
+
+fn format_stream_target_statuses(targets: &[StreamTargetSnapshot]) -> String {
+    if targets.is_empty() {
+        return "none".to_string();
+    }
+
+    targets
+        .iter()
+        .map(|target| {
+            format!(
+                "- {} [{}] {:?} {:?} endpoint={} session={} latency={:?}ms buffer={}% ({} / {} packets, dropped={}) bitrate={}bps bytes={} last_error={}",
+                target.receiver_name,
+                target.receiver_id,
+                target.state,
+                target.health,
+                target.endpoint,
+                target.session_id.as_deref().unwrap_or("not negotiated"),
+                target.metrics.latency_estimate_ms,
+                target.network_buffer.fill_percent(),
+                target.network_buffer.queued_packets,
+                target.network_buffer.max_packets,
+                target.network_buffer.dropped_packets,
+                target.metrics.estimated_bitrate_bps,
+                target.metrics.bytes_sent,
+                target.last_error.as_deref().unwrap_or("none"),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn stream_target_transition_messages(
+    previous: &[StreamTargetSnapshot],
+    next: &[StreamTargetSnapshot],
+) -> Vec<DiagnosticEvent> {
+    let previous_by_id = previous
+        .iter()
+        .map(|target| (target.receiver_id.clone(), target))
+        .collect::<HashMap<_, _>>();
+    let next_by_id = next
+        .iter()
+        .map(|target| (target.receiver_id.clone(), target))
+        .collect::<HashMap<_, _>>();
+    let mut messages = Vec::new();
+
+    for target in next {
+        match previous_by_id.get(&target.receiver_id) {
+            None => messages.push(DiagnosticEvent::info(
+                "streaming",
+                format!(
+                    "Target {} joined the cast collection with state {:?}.",
+                    target.receiver_name, target.state
+                ),
+            )),
+            Some(previous_target) => {
+                if previous_target.state != target.state
+                    || previous_target.health != target.health
+                {
+                    messages.push(DiagnosticEvent::info(
+                        "streaming",
+                        format!(
+                            "Target {} is now {:?} with {:?} health.",
+                            target.receiver_name, target.state, target.health
+                        ),
+                    ));
+                }
+                if previous_target.last_error != target.last_error {
+                    if let Some(error) = &target.last_error {
+                        messages.push(DiagnosticEvent::warning(
+                            "streaming",
+                            format!("Target {} reported: {error}", target.receiver_name),
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    for previous_target in previous {
+        if !next_by_id.contains_key(&previous_target.receiver_id) {
+            messages.push(DiagnosticEvent::info(
+                "streaming",
+                format!(
+                    "Target {} was removed from the cast collection.",
+                    previous_target.receiver_name
+                ),
+            ));
+        }
+    }
+
+    messages
 }
 
 fn refresh_receiver_selector(selector: &gtk::ComboBoxText, state: &AppState) {

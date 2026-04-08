@@ -994,7 +994,12 @@ dependencies = [
 name = "synchrosonic-transport"
 version = "0.1.0"
 dependencies = [
+ "flume",
+ "serde",
+ "serde_json",
  "synchrosonic-core",
+ "synchrosonic-receiver",
+ "tracing",
 ]
 
 [[package]]

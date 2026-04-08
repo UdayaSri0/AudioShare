@@ -9,6 +9,7 @@ use crate::{
         DiscoverySnapshot,
     },
     receiver::ReceiverSnapshot,
+    streaming::{StreamSessionSnapshot, StreamSessionState},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -33,6 +34,8 @@ pub struct AppState {
     pub cast_session: CastSessionState,
     pub capture_state: CaptureState,
     pub receiver: ReceiverSnapshot,
+    pub streaming: StreamSessionSnapshot,
+    pub selected_receiver_device_id: Option<DeviceId>,
     pub audio_sources: Vec<AudioSource>,
     pub selected_audio_source_id: Option<String>,
     pub devices: Vec<DeviceState>,
@@ -45,6 +48,8 @@ impl AppState {
         let receiver = ReceiverSnapshot::from_config(&config.receiver);
         Self {
             receiver,
+            streaming: StreamSessionSnapshot::default(),
+            selected_receiver_device_id: None,
             config,
             cast_session: CastSessionState::Idle,
             capture_state: CaptureState::Idle,
@@ -96,6 +101,32 @@ impl AppState {
         self.receiver = snapshot;
     }
 
+    pub fn apply_streaming_snapshot(&mut self, snapshot: StreamSessionSnapshot) {
+        self.cast_session = match snapshot.state {
+            StreamSessionState::Idle => CastSessionState::Idle,
+            StreamSessionState::Connecting | StreamSessionState::Negotiating => {
+                CastSessionState::Preparing
+            }
+            StreamSessionState::Streaming => CastSessionState::Casting,
+            StreamSessionState::Stopping => CastSessionState::Stopping,
+            StreamSessionState::Error => CastSessionState::Error,
+        };
+        self.streaming = snapshot;
+    }
+
+    pub fn select_receiver_device(&mut self, device_id: DeviceId) -> bool {
+        let is_valid = self
+            .discovered_devices
+            .iter()
+            .any(|device| device.id == device_id && device.capabilities.supports_receiver);
+        if !is_valid {
+            return false;
+        }
+
+        self.selected_receiver_device_id = Some(device_id);
+        true
+    }
+
     pub fn apply_discovery_snapshot(&mut self, snapshot: DiscoverySnapshot) {
         self.discovered_devices = snapshot.devices;
         self.devices = self
@@ -107,6 +138,7 @@ impl AppState {
                 status: device.status,
             })
             .collect();
+        self.reconcile_selected_receiver();
     }
 
     pub fn apply_discovery_event(&mut self, event: DiscoveryEvent) {
@@ -123,6 +155,7 @@ impl AppState {
                 self.upsert_discovered_device(device);
             }
         }
+        self.reconcile_selected_receiver();
     }
 
     fn upsert_discovered_device(&mut self, device: DiscoveredDevice) {
@@ -150,6 +183,30 @@ impl AppState {
             None => self.devices.push(device_state),
         }
     }
+
+    fn reconcile_selected_receiver(&mut self) {
+        let selected_is_valid = self
+            .selected_receiver_device_id
+            .as_ref()
+            .map(|selected_id| {
+                self.discovered_devices.iter().any(|device| {
+                    &device.id == selected_id
+                        && device.capabilities.supports_receiver
+                        && device.endpoint.is_some()
+                })
+            })
+            .unwrap_or(false);
+
+        if selected_is_valid {
+            return;
+        }
+
+        self.selected_receiver_device_id = self
+            .discovered_devices
+            .iter()
+            .find(|device| device.capabilities.supports_receiver && device.endpoint.is_some())
+            .map(|device| device.id.clone());
+    }
 }
 
 #[cfg(test)]
@@ -163,6 +220,7 @@ mod tests {
         assert_eq!(state.cast_session, CastSessionState::Idle);
         assert_eq!(state.capture_state, CaptureState::Idle);
         assert_eq!(state.receiver.state, crate::receiver::ReceiverServiceState::Idle);
+        assert_eq!(state.streaming.state, StreamSessionState::Idle);
         assert_eq!(state.diagnostics.len(), 1);
         assert_eq!(state.devices.len(), 0);
         assert_eq!(state.discovered_devices.len(), 0);
@@ -201,7 +259,10 @@ mod tests {
             capabilities: crate::models::DeviceCapabilities::receiver(),
             availability: crate::models::DeviceAvailability::Available,
             status: DeviceStatus::Discovered,
-            endpoint: None,
+            endpoint: Some(crate::models::TransportEndpoint {
+                device_id: DeviceId::new("receiver-1"),
+                address: std::net::SocketAddr::from(([127, 0, 0, 1], 51_700)),
+            }),
             service_fullname: "Living Room._synchrosonic._tcp.local.".to_string(),
             last_seen_unix_ms: 1,
         };
@@ -209,6 +270,7 @@ mod tests {
         state.apply_discovery_event(DiscoveryEvent::DeviceDiscovered(device.clone()));
         assert_eq!(state.discovered_devices.len(), 1);
         assert_eq!(state.devices.len(), 1);
+        assert_eq!(state.selected_receiver_device_id.as_ref(), Some(&device.id));
 
         state.apply_discovery_event(DiscoveryEvent::DeviceRemoved {
             device_id: device.id,
@@ -216,5 +278,6 @@ mod tests {
         });
         assert!(state.discovered_devices.is_empty());
         assert!(state.devices.is_empty());
+        assert!(state.selected_receiver_device_id.is_none());
     }
 }

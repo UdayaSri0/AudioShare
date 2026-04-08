@@ -71,6 +71,28 @@ pub enum DiscoveryError {
 
 #[derive(Debug, Error)]
 pub enum TransportError {
+    #[error("failed to bind transport listener on {address}: {source}")]
+    Bind { address: String, source: io::Error },
+    #[error("failed to connect transport socket to {address}: {source}")]
+    Connect { address: String, source: io::Error },
+    #[error("transport I/O failed while {context}: {source}")]
+    Io { context: String, source: io::Error },
+    #[error("transport protocol is invalid: {0}")]
+    InvalidProtocol(String),
+    #[error("transport negotiation failed: {0}")]
+    Negotiation(String),
+    #[error("transport worker is already running")]
+    AlreadyRunning,
+    #[error("transport worker is not running")]
+    NotRunning,
+    #[error("transport worker channel is closed")]
+    ChannelClosed,
+    #[error("transport worker thread failed to join cleanly")]
+    ThreadJoin,
+    #[error("transport audio capture failed: {0}")]
+    Audio(#[from] AudioError),
+    #[error("transport receiver callback failed: {0}")]
+    ReceiverCallback(String),
     #[error("transport is not active in this build phase: {0}")]
     NotActive(String),
 }

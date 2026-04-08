@@ -127,6 +127,8 @@ pub struct TransportConfig {
     pub stream_port: u16,
     pub quality: QualityPreset,
     pub target_latency_ms: u16,
+    pub connect_timeout_ms: u16,
+    pub heartbeat_interval_ms: u16,
 }
 
 impl Default for TransportConfig {
@@ -136,6 +138,8 @@ impl Default for TransportConfig {
             stream_port: 51_700,
             quality: QualityPreset::Balanced,
             target_latency_ms: 150,
+            connect_timeout_ms: 2_000,
+            heartbeat_interval_ms: 1_000,
         }
     }
 }
@@ -199,6 +203,7 @@ mod tests {
 
         assert!(config.discovery.enabled);
         assert_eq!(config.transport.stream_port, 51_700);
+        assert_eq!(config.transport.connect_timeout_ms, 2_000);
         assert_eq!(config.audio.sample_rate_hz, 48_000);
         assert_eq!(config.audio.capture_buffer_frames, 480);
         assert!(config.audio.local_playback_enabled);

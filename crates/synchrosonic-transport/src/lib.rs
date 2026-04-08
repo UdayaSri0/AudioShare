@@ -1,63 +1,260 @@
-use synchrosonic_core::{
-    services::TransportService, TransportEndpoint, TransportError,
-};
+mod protocol;
+mod receiver;
+mod sender;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TransportSessionState {
-    Idle,
-    Starting,
-    Active,
-    Stopping,
-}
-
-#[derive(Debug, Clone)]
-pub struct LanTransportService {
-    endpoint: Option<TransportEndpoint>,
-    state: TransportSessionState,
-}
-
-impl LanTransportService {
-    pub fn new(endpoint: Option<TransportEndpoint>) -> Self {
-        Self {
-            endpoint,
-            state: TransportSessionState::Idle,
-        }
-    }
-
-    pub fn state(&self) -> TransportSessionState {
-        self.state
-    }
-}
-
-impl TransportService for LanTransportService {
-    fn endpoint(&self) -> Option<&TransportEndpoint> {
-        self.endpoint.as_ref()
-    }
-
-    fn start(&mut self) -> Result<(), TransportError> {
-        Err(TransportError::NotActive(
-            "LAN stream framing and sockets belong to the sender-to-receiver streaming phase"
-                .to_string(),
-        ))
-    }
-
-    fn stop(&mut self) -> Result<(), TransportError> {
-        self.state = TransportSessionState::Idle;
-        Ok(())
-    }
-}
+pub use receiver::{LanReceiverTransportServer, ReceiverServerSnapshot};
+pub use sender::{LanSenderSession, SenderTarget};
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::{
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc, Mutex,
+        },
+        thread,
+        time::Duration,
+    };
+
+    use synchrosonic_core::{
+        services::{AudioBackend, AudioCapture, ReceiverService},
+        AudioError, AudioFrame, AudioSource, CaptureSettings, CaptureStats,
+        PlaybackTarget, ReceiverError, ReceiverTransportEvent,
+    };
+    use synchrosonic_receiver::{PlaybackEngine, PlaybackSink, PlaybackStartRequest, ReceiverRuntime};
+
+    use crate::{LanReceiverTransportServer, LanSenderSession, SenderTarget};
+
+    struct MockPlaybackEngine {
+        bytes_written: Arc<AtomicUsize>,
+    }
+
+    impl PlaybackEngine for MockPlaybackEngine {
+        fn backend_name(&self) -> &'static str {
+            "mock-playback"
+        }
+
+        fn start_stream(
+            &self,
+            _request: PlaybackStartRequest,
+        ) -> Result<Box<dyn PlaybackSink>, ReceiverError> {
+            Ok(Box::new(MockPlaybackSink {
+                bytes_written: Arc::clone(&self.bytes_written),
+            }))
+        }
+    }
+
+    struct MockPlaybackSink {
+        bytes_written: Arc<AtomicUsize>,
+    }
+
+    impl PlaybackSink for MockPlaybackSink {
+        fn write(&mut self, payload: &[u8]) -> Result<(), ReceiverError> {
+            self.bytes_written.fetch_add(payload.len(), Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn stop(&mut self) -> Result<(), ReceiverError> {
+            Ok(())
+        }
+    }
+
+    #[derive(Clone)]
+    struct MockAudioBackend {
+        frames: Arc<Mutex<Vec<AudioFrame>>>,
+    }
+
+    impl AudioBackend for MockAudioBackend {
+        fn backend_name(&self) -> &'static str {
+            "mock-audio"
+        }
+
+        fn list_sources(&self) -> Result<Vec<AudioSource>, AudioError> {
+            Ok(Vec::new())
+        }
+
+        fn list_playback_targets(&self) -> Result<Vec<PlaybackTarget>, AudioError> {
+            Ok(Vec::new())
+        }
+
+        fn start_capture(
+            &self,
+            _settings: CaptureSettings,
+        ) -> Result<Box<dyn AudioCapture>, AudioError> {
+            Ok(Box::new(MockCapture {
+                frames: self.frames.lock().expect("frames mutex").clone(),
+                index: 0,
+            }))
+        }
+    }
+
+    struct MockCapture {
+        frames: Vec<AudioFrame>,
+        index: usize,
+    }
+
+    impl AudioCapture for MockCapture {
+        fn recv_frame(&mut self) -> Result<AudioFrame, AudioError> {
+            self.try_recv_frame()?
+                .ok_or(AudioError::CaptureEnded)
+        }
+
+        fn try_recv_frame(&mut self) -> Result<Option<AudioFrame>, AudioError> {
+            if self.index >= self.frames.len() {
+                return Ok(None);
+            }
+
+            let frame = self.frames[self.index].clone();
+            self.index += 1;
+            Ok(Some(frame))
+        }
+
+        fn stats(&self) -> CaptureStats {
+            CaptureStats::default()
+        }
+
+        fn stop(&mut self) -> Result<(), AudioError> {
+            Ok(())
+        }
+    }
 
     #[test]
-    fn transport_starts_idle_and_stop_is_idempotent() {
-        let mut service = LanTransportService::new(None);
+    fn sender_streams_audio_to_receiver_runtime_over_tcp() {
+        let bytes_written = Arc::new(AtomicUsize::new(0));
+        let playback_engine = Arc::new(MockPlaybackEngine {
+            bytes_written: Arc::clone(&bytes_written),
+        });
+        let mut receiver_config = synchrosonic_core::config::ReceiverConfig::default();
+        receiver_config.enabled = true;
+        receiver_config.listen_port = 0;
+        let receiver_runtime = Arc::new(Mutex::new(ReceiverRuntime::with_playback_engine(
+            receiver_config.clone(),
+            playback_engine,
+        )));
+        receiver_runtime
+            .lock()
+            .expect("receiver runtime mutex")
+            .start()
+            .expect("receiver runtime should start");
 
-        assert_eq!(service.state(), TransportSessionState::Idle);
-        service.stop().expect("stop should be safe when idle");
-        assert_eq!(service.state(), TransportSessionState::Idle);
+        let mut server = LanReceiverTransportServer::new(
+            std::net::SocketAddr::from(([127, 0, 0, 1], receiver_config.listen_port)),
+            receiver_config.advertised_name.clone(),
+            receiver_config.latency_preset,
+            500,
+        );
+        {
+            let receiver_runtime_for_events = Arc::clone(&receiver_runtime);
+            match server.start(move |event: ReceiverTransportEvent| {
+                receiver_runtime_for_events
+                    .lock()
+                    .map_err(|_| ReceiverError::ThreadJoin)?
+                    .submit_transport_event(event)
+            }) {
+                Ok(()) => {}
+                Err(synchrosonic_core::TransportError::Bind { source, .. })
+                    if source.kind() == std::io::ErrorKind::PermissionDenied =>
+                {
+                    receiver_runtime
+                        .lock()
+                        .expect("receiver runtime mutex")
+                        .stop()
+                        .expect("receiver runtime should stop after skipped bind");
+                    return;
+                }
+                Err(error) => panic!("receiver server should start: {error}"),
+            }
+        }
+        let listen_addr = server.snapshot().bind_addr;
+
+        let frames = vec![
+            AudioFrame::from_payload(
+                0,
+                Duration::from_millis(0),
+                &CaptureSettings::default(),
+                vec![0; 1_920],
+            ),
+            AudioFrame::from_payload(
+                1,
+                Duration::from_millis(10),
+                &CaptureSettings::default(),
+                vec![0; 1_920],
+            ),
+            AudioFrame::from_payload(
+                2,
+                Duration::from_millis(20),
+                &CaptureSettings::default(),
+                vec![0; 1_920],
+            ),
+            AudioFrame::from_payload(
+                3,
+                Duration::from_millis(30),
+                &CaptureSettings::default(),
+                vec![0; 1_920],
+            ),
+        ];
+
+        let backend = MockAudioBackend {
+            frames: Arc::new(Mutex::new(frames)),
+        };
+        let mut sender = LanSenderSession::new(synchrosonic_core::config::TransportConfig::default());
+        sender
+            .start(
+                backend,
+                CaptureSettings::default(),
+                SenderTarget::new(
+                    synchrosonic_core::DeviceId::new("receiver-1"),
+                    "Receiver",
+                    synchrosonic_core::TransportEndpoint {
+                        device_id: synchrosonic_core::DeviceId::new("receiver-1"),
+                        address: listen_addr,
+                    },
+                ),
+                "Sender",
+            )
+            .expect("sender should start");
+
+        thread::sleep(Duration::from_millis(150));
+
+        let sender_snapshot = sender.snapshot();
+        let receiver_snapshot = receiver_runtime
+            .lock()
+            .expect("receiver runtime mutex")
+            .snapshot();
+
+        assert_eq!(sender_snapshot.state, synchrosonic_core::StreamSessionState::Streaming);
+        assert!(sender_snapshot.metrics.packets_sent >= 4);
+        assert!(receiver_snapshot.metrics.packets_received >= 4);
+        assert!(bytes_written.load(Ordering::SeqCst) > 0);
+
+        sender.stop().expect("sender should stop");
+        server.stop().expect("receiver server should stop");
+        receiver_runtime
+            .lock()
+            .expect("receiver runtime mutex")
+            .stop()
+            .expect("receiver runtime should stop");
+    }
+
+    #[test]
+    fn receiver_server_snapshot_starts_inactive() {
+        let server = LanReceiverTransportServer::new(
+            std::net::SocketAddr::from(([127, 0, 0, 1], 51_700)),
+            "Receiver",
+            synchrosonic_core::ReceiverLatencyPreset::Balanced,
+            1_000,
+        );
+
+        assert!(!server.snapshot().active);
+    }
+
+    #[test]
+    fn sender_session_starts_idle() {
+        let sender = LanSenderSession::new(synchrosonic_core::config::TransportConfig::default());
+
+        assert_eq!(
+            sender.snapshot().state,
+            synchrosonic_core::StreamSessionState::Idle
+        );
     }
 }
-

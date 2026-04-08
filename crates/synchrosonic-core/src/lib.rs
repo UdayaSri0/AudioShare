@@ -6,6 +6,7 @@ pub mod models;
 pub mod receiver;
 pub mod services;
 pub mod state;
+pub mod streaming;
 
 pub use audio::{
     AudioDevice, AudioDeviceDirection, AudioFrame, AudioFrameStats, AudioSampleFormat,
@@ -25,3 +26,7 @@ pub use receiver::{
     ReceiverStreamConfig, ReceiverTransportEvent,
 };
 pub use state::{AppState, CastSessionState};
+pub use streaming::{
+    StreamCodec, StreamMetrics, StreamSessionSnapshot, StreamSessionState,
+    STREAM_PROTOCOL_VERSION,
+};

@@ -1,8 +1,9 @@
 # Receiver Mode
 
 SynchroSonic receiver mode is now implemented as a dedicated runtime in
-`crates/synchrosonic-receiver`. It can be started and stopped from the GTK app,
-tracks an explicit receiver lifecycle, buffers inbound PCM packets before
+`crates/synchrosonic-receiver` and is fed by the TCP listener in
+`crates/synchrosonic-transport`. It can be started and stopped from the GTK
+app, tracks an explicit receiver lifecycle, buffers inbound PCM packets before
 playback, and writes decoded audio to PipeWire on Linux through `pw-play`.
 
 ## Runtime Lifecycle
@@ -24,9 +25,10 @@ receiver worker thread.
 
 ## Transport Contract
 
-Receiver mode is transport-agnostic for now. Future LAN streaming code should
-hand events into `ReceiverRuntime::submit_transport_event` using the shared
-types in `crates/synchrosonic-core/src/receiver.rs`.
+Receiver mode stays transport-agnostic internally. The current
+`LanReceiverTransportServer` hands events into
+`ReceiverRuntime::submit_transport_event` using the shared types in
+`crates/synchrosonic-core/src/receiver.rs`.
 
 The contract is:
 
@@ -92,7 +94,7 @@ still making the runtime testable with a mock playback engine.
 
 Incoming frames are handed to playback like this:
 
-1. Future transport code emits `ReceiverTransportEvent::Connected` with the
+1. The TCP listener emits `ReceiverTransportEvent::Connected` with the
    negotiated `ReceiverStreamConfig`.
 2. The receiver runtime opens a `PlaybackSink` for that stream and transitions
    to `Connected`.
@@ -138,5 +140,6 @@ The GTK app now:
 - polls the runtime snapshot once per second to refresh the UI and app
   diagnostics
 
-This means Prompt 5 can focus on the actual LAN transport path and simply feed
-its decoded packets into the existing receiver runtime.
+The current LAN streaming path already does exactly that: TCP transport decodes
+the wire protocol, emits `ReceiverTransportEvent` values, and the receiver
+runtime handles buffering and playback.

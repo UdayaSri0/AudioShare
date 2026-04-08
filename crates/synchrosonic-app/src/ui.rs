@@ -212,7 +212,7 @@ fn dashboard_page(
     page.append(&title);
 
     let summary = gtk::Label::new(Some(
-        "PipeWire source enumeration is active. Cast controls stay disabled until transport and receiver playback are wired to verified end-to-end session behavior.",
+        "PipeWire source enumeration is active and the sender/receiver pipeline is live. Use the Streaming page to start a cast session and decide whether the captured stream also mirrors to a local playback branch.",
     ));
     summary.set_wrap(true);
     summary.set_halign(Align::Start);
@@ -230,7 +230,7 @@ fn dashboard_page(
     let start_button = gtk::Button::with_label("Start Casting");
     start_button.set_sensitive(false);
     start_button.set_tooltip_text(Some(
-        "Disabled until the capture session is connected to transport and receiver playback.",
+        "Use the dedicated Streaming page controls for live cast and local mirror management.",
     ));
     start_button.set_halign(Align::Start);
     page.append(&start_button);
@@ -301,7 +301,7 @@ fn streaming_page(
     page.append(&heading);
 
     let summary = gtk::Label::new(Some(
-        "The sender uses a TCP session with a framed SynchroSonic protocol and raw PCM payloads. Pick one discovered receiver, negotiate the session, then push captured PipeWire frames straight into the receiver playback pipeline.",
+        "The sender uses one capture stream with an explicit fan-out: a bounded network queue feeds the TCP transport branch while an optional bounded local queue feeds sender-side playback. Each branch can lag or drop independently without blocking the other one.",
     ));
     summary.set_wrap(true);
     summary.set_halign(Align::Start);
@@ -321,6 +321,15 @@ fn streaming_page(
     }
     page.append(&receiver_selector);
 
+    let mirror_row = gtk::Box::new(Orientation::Horizontal, 12);
+    let mirror_label = gtk::Label::new(Some("Mirror locally while casting"));
+    mirror_label.set_halign(Align::Start);
+    let mirror_switch = gtk::Switch::new();
+    mirror_switch.set_active(state.borrow().config.audio.local_playback_enabled);
+    mirror_row.append(&mirror_label);
+    mirror_row.append(&mirror_switch);
+    page.append(&mirror_row);
+
     let controls = gtk::Box::new(Orientation::Horizontal, 12);
     let start_button = gtk::Button::with_label("Start Stream");
     let stop_button = gtk::Button::with_label("Stop Stream");
@@ -333,6 +342,49 @@ fn streaming_page(
     status_label.set_selectable(true);
     status_label.set_halign(Align::Start);
     page.append(&status_label);
+
+    {
+        let state = Rc::clone(&state);
+        let sender = Arc::clone(&sender);
+        let status_label = status_label.clone();
+        mirror_switch.connect_active_notify(move |toggle| {
+            let enabled = toggle.is_active();
+            let (result, snapshot) = {
+                let sender = sender.lock().expect("sender session mutex");
+                (sender.set_local_playback_enabled(enabled), sender.snapshot())
+            };
+
+            let mut state = state.borrow_mut();
+            state.set_local_playback_enabled(enabled);
+            state.apply_streaming_snapshot(snapshot);
+
+            match result {
+                Ok(()) => {
+                    let scope = if state.streaming.state == synchrosonic_core::StreamSessionState::Idle
+                    {
+                        "next cast session"
+                    } else {
+                        "active cast session"
+                    };
+                    state.diagnostics.push(DiagnosticEvent::info(
+                        "streaming",
+                        format!(
+                            "Local playback mirror {} for the {scope}.",
+                            if enabled { "enabled" } else { "disabled" }
+                        ),
+                    ));
+                }
+                Err(error) => {
+                    state.diagnostics.push(DiagnosticEvent::error(
+                        "streaming",
+                        format!("Failed to update local playback mirror: {error}"),
+                    ));
+                }
+            }
+
+            status_label.set_text(&format_streaming_status(&state));
+        });
+    }
 
     {
         let state = Rc::clone(&state);
@@ -385,7 +437,7 @@ fn streaming_page(
                     state.diagnostics.push(DiagnosticEvent::info(
                         "streaming",
                         format!(
-                            "Started LAN stream toward {} at {}.",
+                            "Started LAN stream toward {} at {} with local mirror {}.",
                             snapshot
                                 .receiver_name
                                 .as_deref()
@@ -393,7 +445,12 @@ fn streaming_page(
                             snapshot
                                 .endpoint
                                 .map(|endpoint| endpoint.to_string())
-                                .unwrap_or_else(|| "unknown endpoint".to_string())
+                                .unwrap_or_else(|| "unknown endpoint".to_string()),
+                            if snapshot.local_mirror.desired_enabled {
+                                "enabled"
+                            } else {
+                                "disabled"
+                            }
                         ),
                     ));
                     status_label.set_text(&format_streaming_status(&state));
@@ -702,6 +759,17 @@ fn start_streaming_poll(
                 None
             }
         };
+        let local_mirror_state_message = {
+            let state = state.borrow();
+            if state.streaming.local_mirror.state != snapshot.local_mirror.state {
+                Some(format!(
+                    "Local playback mirror is now {:?}",
+                    snapshot.local_mirror.state
+                ))
+            } else {
+                None
+            }
+        };
         let error_message = {
             let state = state.borrow();
             if state.streaming.last_error != snapshot.last_error {
@@ -709,6 +777,16 @@ fn start_streaming_poll(
                     .last_error
                     .as_ref()
                     .map(|error| format!("Sender stream reported: {error}"))
+            } else {
+                None
+            }
+        };
+        let local_mirror_error_message = {
+            let state = state.borrow();
+            if state.streaming.local_mirror.last_error != snapshot.local_mirror.last_error {
+                snapshot.local_mirror.last_error.as_ref().map(|error| {
+                    format!("Local playback mirror reported: {error}")
+                })
             } else {
                 None
             }
@@ -723,6 +801,16 @@ fn start_streaming_poll(
                     .push(DiagnosticEvent::info("streaming", message));
             }
             if let Some(message) = error_message {
+                state
+                    .diagnostics
+                    .push(DiagnosticEvent::warning("streaming", message));
+            }
+            if let Some(message) = local_mirror_state_message {
+                state
+                    .diagnostics
+                    .push(DiagnosticEvent::info("streaming", message));
+            }
+            if let Some(message) = local_mirror_error_message {
                 state
                     .diagnostics
                     .push(DiagnosticEvent::warning("streaming", message));
@@ -784,7 +872,7 @@ fn format_dashboard_status(
     audio_source_summary: &str,
 ) -> String {
     format!(
-        "Session: {:?}\nCapture: {:?}\nStreaming: {:?}\nSelected receiver: {}\nSender metrics: packets sent={} bytes sent={} bitrate={}bps latency={:?}ms gaps={} keepalives={}/{}\nReceiver: {:?}\nReceiver buffer: {}% ({} / {} packets)\nReceiver metrics: packets in={} played={} underruns={} overruns={} reconnects={}\nAudio backend: {}\n{}\nDefault stream port: {}\nLocal playback default: {}",
+        "Session: {:?}\nCapture: {:?}\nStreaming: {:?}\nSelected receiver: {}\nNetwork branch: {}% full ({} / {} packets, dropped={})\nLocal mirror: desired={} state={:?} buffer={}% ({} / {} packets, dropped={}) played packets={} bytes={} error={}\nSender metrics: packets sent={} bytes sent={} bitrate={}bps latency={:?}ms gaps={} keepalives={}/{}\nReceiver: {:?}\nReceiver buffer: {}% ({} / {} packets)\nReceiver metrics: packets in={} played={} underruns={} overruns={} reconnects={}\nAudio backend: {}\n{}\nDefault stream port: {}\nLocal playback default: {}",
         state.cast_session,
         state.capture_state,
         state.streaming.state,
@@ -793,6 +881,24 @@ fn format_dashboard_status(
             .as_ref()
             .map(ToString::to_string)
             .unwrap_or_else(|| "none".to_string()),
+        state.streaming.network_buffer.fill_percent(),
+        state.streaming.network_buffer.queued_packets,
+        state.streaming.network_buffer.max_packets,
+        state.streaming.network_buffer.dropped_packets,
+        state.streaming.local_mirror.desired_enabled,
+        state.streaming.local_mirror.state,
+        state.streaming.local_mirror.buffer.fill_percent(),
+        state.streaming.local_mirror.buffer.queued_packets,
+        state.streaming.local_mirror.buffer.max_packets,
+        state.streaming.local_mirror.buffer.dropped_packets,
+        state.streaming.local_mirror.packets_played,
+        state.streaming.local_mirror.bytes_played,
+        state
+            .streaming
+            .local_mirror
+            .last_error
+            .as_deref()
+            .unwrap_or("none"),
         state.streaming.metrics.packets_sent,
         state.streaming.metrics.bytes_sent,
         state.streaming.metrics.estimated_bitrate_bps,
@@ -822,6 +928,8 @@ fn format_dashboard_status(
 
 fn format_streaming_status(state: &AppState) -> String {
     let stream = &state.streaming;
+    let network_buffer = &stream.network_buffer;
+    let local_mirror = &stream.local_mirror;
     let selected_device = state
         .selected_receiver_device_id
         .as_ref()
@@ -851,7 +959,7 @@ fn format_streaming_status(state: &AppState) -> String {
     let last_error = stream.last_error.as_deref().unwrap_or("none");
 
     format!(
-        "State: {:?}\nSelected receiver id: {}\nNegotiated receiver: {}\nEndpoint: {}\nSession id: {}\nCodec: {}\nStream: {}\nMetrics: packets sent={} packets received={} bytes sent={} bytes received={} bitrate={}bps latency estimate={:?}ms packet gaps={} keepalives sent={} keepalives received={}\nLast error: {}\nTransport path: TCP session -> framed control/audio messages -> receiver transport server -> receiver runtime buffer -> PipeWire playback.",
+        "State: {:?}\nSelected receiver id: {}\nNegotiated receiver: {}\nEndpoint: {}\nSession id: {}\nCodec: {}\nStream: {}\nNetwork branch: {}% full ({} / {} packets, dropped={})\nLocal mirror: desired={} state={:?} backend={} target={} buffer={}% ({} / {} packets, dropped={}) played packets={} bytes={} error={}\nMetrics: packets sent={} packets received={} bytes sent={} bytes received={} bitrate={}bps latency estimate={:?}ms packet gaps={} keepalives sent={} keepalives received={}\nLast error: {}\nSplit-stream path: PipeWire capture -> explicit branch fan-out -> [bounded network queue -> TCP framed transport -> receiver runtime -> PipeWire playback] + [bounded local mirror queue -> sender-side PipeWire playback].",
         stream.state,
         selected_device,
         receiver,
@@ -862,6 +970,27 @@ fn format_streaming_status(state: &AppState) -> String {
             .map(|codec| format!("{codec:?}"))
             .unwrap_or_else(|| "not negotiated".to_string()),
         stream_shape,
+        network_buffer.fill_percent(),
+        network_buffer.queued_packets,
+        network_buffer.max_packets,
+        network_buffer.dropped_packets,
+        local_mirror.desired_enabled,
+        local_mirror.state,
+        local_mirror
+            .playback_backend
+            .as_deref()
+            .unwrap_or("not configured"),
+        local_mirror
+            .playback_target_id
+            .as_deref()
+            .unwrap_or("default PipeWire sink"),
+        local_mirror.buffer.fill_percent(),
+        local_mirror.buffer.queued_packets,
+        local_mirror.buffer.max_packets,
+        local_mirror.buffer.dropped_packets,
+        local_mirror.packets_played,
+        local_mirror.bytes_played,
+        local_mirror.last_error.as_deref().unwrap_or("none"),
         stream.metrics.packets_sent,
         stream.metrics.packets_received,
         stream.metrics.bytes_sent,

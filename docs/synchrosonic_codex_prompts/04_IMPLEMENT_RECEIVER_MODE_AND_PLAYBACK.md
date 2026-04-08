@@ -42,3 +42,6 @@ Validation:
 - receiver mode can be started/stopped from internal app flow
 - summary explains how incoming frames are handed to playback
 ```
+
+used 
+v0.0.4

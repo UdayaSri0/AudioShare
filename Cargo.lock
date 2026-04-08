@@ -986,6 +986,7 @@ name = "synchrosonic-receiver"
 version = "0.1.0"
 dependencies = [
  "flume",
+ "synchrosonic-audio",
  "synchrosonic-core",
  "tracing",
 ]
@@ -997,6 +998,7 @@ dependencies = [
  "flume",
  "serde",
  "serde_json",
+ "synchrosonic-audio",
  "synchrosonic-core",
  "synchrosonic-receiver",
  "tracing",

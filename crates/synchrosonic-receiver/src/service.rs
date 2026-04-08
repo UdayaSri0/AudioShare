@@ -487,8 +487,8 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use synchrosonic_core::{
-        AudioSampleFormat, ReceiverAudioPacket, ReceiverConnectionInfo, ReceiverLatencyPreset,
-        ReceiverStreamConfig, ReceiverTransportEvent,
+        AudioError, AudioSampleFormat, ReceiverAudioPacket, ReceiverConnectionInfo,
+        ReceiverLatencyPreset, ReceiverStreamConfig, ReceiverTransportEvent,
     };
 
     struct MockPlaybackEngine {
@@ -503,7 +503,7 @@ mod tests {
         fn start_stream(
             &self,
             _request: PlaybackStartRequest,
-        ) -> Result<Box<dyn PlaybackSink>, ReceiverError> {
+        ) -> Result<Box<dyn PlaybackSink>, AudioError> {
             Ok(Box::new(MockPlaybackSink {
                 writes: Arc::clone(&self.writes),
             }))
@@ -515,12 +515,12 @@ mod tests {
     }
 
     impl PlaybackSink for MockPlaybackSink {
-        fn write(&mut self, payload: &[u8]) -> Result<(), ReceiverError> {
+        fn write(&mut self, payload: &[u8]) -> Result<(), AudioError> {
             self.writes.fetch_add(payload.len(), Ordering::SeqCst);
             Ok(())
         }
 
-        fn stop(&mut self) -> Result<(), ReceiverError> {
+        fn stop(&mut self) -> Result<(), AudioError> {
             Ok(())
         }
     }

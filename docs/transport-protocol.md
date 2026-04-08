@@ -166,6 +166,9 @@ The end-to-end path is:
 pw-record
   -> LinuxAudioBackend / AudioCapture
   -> LanSenderSession
+  -> explicit fan-out
+     -> bounded network queue
+     -> bounded local mirror queue (optional)
   -> TCP socket
   -> SynchroSonic framed protocol
   -> LanReceiverTransportServer
@@ -195,6 +198,8 @@ Sender-side `StreamSessionSnapshot` exposes:
 - `packet_gaps`
 - `keepalives_sent`
 - `keepalives_received`
+- `network_buffer`
+- `local_mirror`
 
 Receiver-side `ReceiverSnapshot` exposes:
 

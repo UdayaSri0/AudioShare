@@ -1,3 +1,4 @@
+mod fanout;
 mod protocol;
 mod receiver;
 mod sender;
@@ -16,12 +17,13 @@ mod tests {
         time::Duration,
     };
 
+    use synchrosonic_audio::{PlaybackEngine, PlaybackSink, PlaybackStartRequest};
     use synchrosonic_core::{
         services::{AudioBackend, AudioCapture, ReceiverService},
         AudioError, AudioFrame, AudioSource, CaptureSettings, CaptureStats,
         PlaybackTarget, ReceiverError, ReceiverTransportEvent,
     };
-    use synchrosonic_receiver::{PlaybackEngine, PlaybackSink, PlaybackStartRequest, ReceiverRuntime};
+    use synchrosonic_receiver::ReceiverRuntime;
 
     use crate::{LanReceiverTransportServer, LanSenderSession, SenderTarget};
 
@@ -37,7 +39,7 @@ mod tests {
         fn start_stream(
             &self,
             _request: PlaybackStartRequest,
-        ) -> Result<Box<dyn PlaybackSink>, ReceiverError> {
+        ) -> Result<Box<dyn PlaybackSink>, AudioError> {
             Ok(Box::new(MockPlaybackSink {
                 bytes_written: Arc::clone(&self.bytes_written),
             }))
@@ -49,12 +51,12 @@ mod tests {
     }
 
     impl PlaybackSink for MockPlaybackSink {
-        fn write(&mut self, payload: &[u8]) -> Result<(), ReceiverError> {
+        fn write(&mut self, payload: &[u8]) -> Result<(), AudioError> {
             self.bytes_written.fetch_add(payload.len(), Ordering::SeqCst);
             Ok(())
         }
 
-        fn stop(&mut self) -> Result<(), ReceiverError> {
+        fn stop(&mut self) -> Result<(), AudioError> {
             Ok(())
         }
     }
@@ -120,9 +122,10 @@ mod tests {
 
     #[test]
     fn sender_streams_audio_to_receiver_runtime_over_tcp() {
-        let bytes_written = Arc::new(AtomicUsize::new(0));
+        let receiver_bytes_written = Arc::new(AtomicUsize::new(0));
+        let local_mirror_bytes_written = Arc::new(AtomicUsize::new(0));
         let playback_engine = Arc::new(MockPlaybackEngine {
-            bytes_written: Arc::clone(&bytes_written),
+            bytes_written: Arc::clone(&receiver_bytes_written),
         });
         let mut receiver_config = synchrosonic_core::config::ReceiverConfig::default();
         receiver_config.enabled = true;
@@ -197,7 +200,12 @@ mod tests {
         let backend = MockAudioBackend {
             frames: Arc::new(Mutex::new(frames)),
         };
-        let mut sender = LanSenderSession::new(synchrosonic_core::config::TransportConfig::default());
+        let mut sender = LanSenderSession::with_playback_engine(
+            synchrosonic_core::config::TransportConfig::default(),
+            Arc::new(MockPlaybackEngine {
+                bytes_written: Arc::clone(&local_mirror_bytes_written),
+            }),
+        );
         sender
             .start(
                 backend,
@@ -224,8 +232,10 @@ mod tests {
 
         assert_eq!(sender_snapshot.state, synchrosonic_core::StreamSessionState::Streaming);
         assert!(sender_snapshot.metrics.packets_sent >= 4);
+        assert!(sender_snapshot.local_mirror.packets_played >= 4);
         assert!(receiver_snapshot.metrics.packets_received >= 4);
-        assert!(bytes_written.load(Ordering::SeqCst) > 0);
+        assert!(receiver_bytes_written.load(Ordering::SeqCst) > 0);
+        assert!(local_mirror_bytes_written.load(Ordering::SeqCst) > 0);
 
         sender.stop().expect("sender should stop");
         server.stop().expect("receiver server should stop");

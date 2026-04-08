@@ -9,7 +9,7 @@ use crate::{
         DiscoverySnapshot,
     },
     receiver::ReceiverSnapshot,
-    streaming::{StreamSessionSnapshot, StreamSessionState},
+    streaming::{LocalMirrorState, StreamSessionSnapshot, StreamSessionState},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -46,9 +46,16 @@ pub struct AppState {
 impl AppState {
     pub fn new(config: AppConfig) -> Self {
         let receiver = ReceiverSnapshot::from_config(&config.receiver);
+        let mut streaming = StreamSessionSnapshot::default();
+        streaming.local_mirror.desired_enabled = config.audio.local_playback_enabled;
+        streaming.local_mirror.state = if config.audio.local_playback_enabled {
+            LocalMirrorState::Idle
+        } else {
+            LocalMirrorState::Disabled
+        };
         Self {
             receiver,
-            streaming: StreamSessionSnapshot::default(),
+            streaming,
             selected_receiver_device_id: None,
             config,
             cast_session: CastSessionState::Idle,
@@ -95,6 +102,18 @@ impl AppState {
         self.config.audio.preferred_source_id = Some(source_id);
         self.capture_state = CaptureState::SourceChanged;
         true
+    }
+
+    pub fn set_local_playback_enabled(&mut self, enabled: bool) {
+        self.config.audio.local_playback_enabled = enabled;
+        self.streaming.local_mirror.desired_enabled = enabled;
+        if self.streaming.state == StreamSessionState::Idle {
+            self.streaming.local_mirror.state = if enabled {
+                LocalMirrorState::Idle
+            } else {
+                LocalMirrorState::Disabled
+            };
+        }
     }
 
     pub fn apply_receiver_snapshot(&mut self, snapshot: ReceiverSnapshot) {
@@ -221,6 +240,8 @@ mod tests {
         assert_eq!(state.capture_state, CaptureState::Idle);
         assert_eq!(state.receiver.state, crate::receiver::ReceiverServiceState::Idle);
         assert_eq!(state.streaming.state, StreamSessionState::Idle);
+        assert!(state.streaming.local_mirror.desired_enabled);
+        assert_eq!(state.streaming.local_mirror.state, LocalMirrorState::Idle);
         assert_eq!(state.diagnostics.len(), 1);
         assert_eq!(state.devices.len(), 0);
         assert_eq!(state.discovered_devices.len(), 0);
@@ -246,6 +267,21 @@ mod tests {
 
         assert_eq!(state.selected_audio_source_id.as_deref(), Some("speaker"));
         assert_eq!(state.config.audio.preferred_source_id.as_deref(), Some("speaker"));
+    }
+
+    #[test]
+    fn local_playback_toggle_updates_config_and_streaming_snapshot() {
+        let mut state = AppState::new(AppConfig::default());
+
+        state.set_local_playback_enabled(false);
+        assert!(!state.config.audio.local_playback_enabled);
+        assert!(!state.streaming.local_mirror.desired_enabled);
+        assert_eq!(state.streaming.local_mirror.state, LocalMirrorState::Disabled);
+
+        state.set_local_playback_enabled(true);
+        assert!(state.config.audio.local_playback_enabled);
+        assert!(state.streaming.local_mirror.desired_enabled);
+        assert_eq!(state.streaming.local_mirror.state, LocalMirrorState::Idle);
     }
 
     #[test]

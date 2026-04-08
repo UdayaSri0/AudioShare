@@ -17,9 +17,10 @@ network transport, and receiver mode.
 - `synchrosonic-discovery` owns mDNS service advertisement, browsing, and the
   in-memory registry of SynchroSonic devices seen on the LAN.
 - `synchrosonic-transport` owns the LAN streaming session model and will later
-  own stream framing, connection lifecycle, and quality/latency controls.
-- `synchrosonic-receiver` owns receiver-mode startup state and will later connect
-  discovery, transport input, and playback output.
+  own stream framing, connection lifecycle, fan-out routing, and
+  quality/latency controls.
+- `synchrosonic-receiver` owns receiver-mode lifecycle, explicit packet
+  buffering, transport-event handoff, and playback output.
 
 ## Dependency Direction
 
@@ -43,10 +44,10 @@ platforms.
 
 ## Startup Flow
 
-The baseline app starts logging, creates a default `AppConfig`, builds an
-`AppState`, and opens a GTK/libadwaita window with pages for dashboard, devices,
-settings, diagnostics, and about. Controls that would imply real streaming are
-disabled until the audio and transport milestones implement real behavior.
+The app starts logging, creates a default `AppConfig`, builds an `AppState`,
+starts discovery, wires the receiver runtime and transport listener, and opens a
+GTK/libadwaita window with pages for dashboard, devices, streaming, receiver,
+settings, diagnostics, and about.
 
 ## Audio Boundary
 
@@ -70,8 +71,9 @@ app/protocol version, capabilities, and availability. Discovery events update
 owning mDNS sockets.
 
 Transport is modeled separately so the streaming protocol can evolve without
-touching GTK UI code. The current transport crate tracks session state but does
-not open network connections yet.
+touching GTK UI code. The transport crate now owns TCP session setup,
+negotiation, heartbeats, sender-side branch fan-out, and the sender session
+state snapshot consumed by the UI.
 
 ## Bluetooth Scope
 

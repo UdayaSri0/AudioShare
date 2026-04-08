@@ -9,5 +9,6 @@ authors.workspace = true
 
 [dependencies]
 flume.workspace = true
+synchrosonic-audio = { path = "../synchrosonic-audio" }
 synchrosonic-core = { path = "../synchrosonic-core" }
 tracing.workspace = true

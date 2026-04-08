@@ -3,6 +3,7 @@ pub mod config;
 pub mod diagnostics;
 pub mod error;
 pub mod models;
+pub mod receiver;
 pub mod services;
 pub mod state;
 
@@ -17,5 +18,10 @@ pub use models::{
     AudioSource, AudioSourceKind, DeviceAvailability, DeviceCapabilities, DeviceId, DeviceRole,
     DeviceStatus, DiscoveredDevice, DiscoveryEvent, DiscoverySnapshot, PlaybackTarget,
     QualityPreset, TransportEndpoint, DISCOVERY_PROTOCOL_VERSION,
+};
+pub use receiver::{
+    ReceiverAudioPacket, ReceiverBufferSnapshot, ReceiverConnectionInfo, ReceiverLatencyPreset,
+    ReceiverLatencyProfile, ReceiverMetrics, ReceiverServiceState, ReceiverSnapshot,
+    ReceiverStreamConfig, ReceiverTransportEvent,
 };
 pub use state::{AppState, CastSessionState};

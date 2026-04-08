@@ -2,6 +2,7 @@ use crate::{
     audio::{AudioFrame, CaptureSettings, CaptureStats},
     error::{AudioError, DiscoveryError, ReceiverError, TransportError},
     models::{AudioSource, DiscoveryEvent, DiscoverySnapshot, PlaybackTarget, TransportEndpoint},
+    receiver::{ReceiverServiceState, ReceiverSnapshot, ReceiverTransportEvent},
 };
 
 pub trait AudioCapture: Send {
@@ -36,5 +37,9 @@ pub trait TransportService {
 
 pub trait ReceiverService {
     fn advertised_name(&self) -> &str;
+    fn state(&self) -> ReceiverServiceState;
+    fn snapshot(&self) -> ReceiverSnapshot;
     fn start(&mut self) -> Result<(), ReceiverError>;
+    fn stop(&mut self) -> Result<(), ReceiverError>;
+    fn submit_transport_event(&self, event: ReceiverTransportEvent) -> Result<(), ReceiverError>;
 }

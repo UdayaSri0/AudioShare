@@ -8,5 +8,6 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
+flume.workspace = true
 synchrosonic-core = { path = "../synchrosonic-core" }
-
+tracing.workspace = true

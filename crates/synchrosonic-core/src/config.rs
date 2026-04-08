@@ -6,6 +6,7 @@ use crate::{
     audio::{AudioSampleFormat, CaptureOutputs, CaptureSettings},
     error::ConfigError,
     models::QualityPreset,
+    receiver::ReceiverLatencyPreset,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -143,6 +144,10 @@ impl Default for TransportConfig {
 pub struct ReceiverConfig {
     pub enabled: bool,
     pub advertised_name: String,
+    pub bind_host: String,
+    pub listen_port: u16,
+    pub playback_target_id: Option<String>,
+    pub latency_preset: ReceiverLatencyPreset,
 }
 
 impl Default for ReceiverConfig {
@@ -150,6 +155,10 @@ impl Default for ReceiverConfig {
         Self {
             enabled: false,
             advertised_name: "SynchroSonic Receiver".to_string(),
+            bind_host: "0.0.0.0".to_string(),
+            listen_port: 51_700,
+            playback_target_id: None,
+            latency_preset: ReceiverLatencyPreset::Balanced,
         }
     }
 }
@@ -193,6 +202,7 @@ mod tests {
         assert_eq!(config.audio.sample_rate_hz, 48_000);
         assert_eq!(config.audio.capture_buffer_frames, 480);
         assert!(config.audio.local_playback_enabled);
+        assert_eq!(config.receiver.listen_port, 51_700);
     }
 
     #[test]

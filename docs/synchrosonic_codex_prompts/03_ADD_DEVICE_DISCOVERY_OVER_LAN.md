@@ -34,3 +34,5 @@ Validation:
 - compile and run
 - provide a small developer test path or debug screen/list showing discovered devices
 ```
+used
+v0.0.3

@@ -8,6 +8,7 @@ use crate::{
         AudioSource, AudioSourceKind, DeviceId, DeviceStatus, DiscoveredDevice, DiscoveryEvent,
         DiscoverySnapshot,
     },
+    receiver::ReceiverSnapshot,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -31,6 +32,7 @@ pub struct AppState {
     pub config: AppConfig,
     pub cast_session: CastSessionState,
     pub capture_state: CaptureState,
+    pub receiver: ReceiverSnapshot,
     pub audio_sources: Vec<AudioSource>,
     pub selected_audio_source_id: Option<String>,
     pub devices: Vec<DeviceState>,
@@ -40,7 +42,9 @@ pub struct AppState {
 
 impl AppState {
     pub fn new(config: AppConfig) -> Self {
+        let receiver = ReceiverSnapshot::from_config(&config.receiver);
         Self {
+            receiver,
             config,
             cast_session: CastSessionState::Idle,
             capture_state: CaptureState::Idle,
@@ -86,6 +90,10 @@ impl AppState {
         self.config.audio.preferred_source_id = Some(source_id);
         self.capture_state = CaptureState::SourceChanged;
         true
+    }
+
+    pub fn apply_receiver_snapshot(&mut self, snapshot: ReceiverSnapshot) {
+        self.receiver = snapshot;
     }
 
     pub fn apply_discovery_snapshot(&mut self, snapshot: DiscoverySnapshot) {
@@ -154,6 +162,7 @@ mod tests {
 
         assert_eq!(state.cast_session, CastSessionState::Idle);
         assert_eq!(state.capture_state, CaptureState::Idle);
+        assert_eq!(state.receiver.state, crate::receiver::ReceiverServiceState::Idle);
         assert_eq!(state.diagnostics.len(), 1);
         assert_eq!(state.devices.len(), 0);
         assert_eq!(state.discovered_devices.len(), 0);

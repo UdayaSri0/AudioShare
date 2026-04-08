@@ -33,3 +33,5 @@ Validation:
 - include one simple developer-visible way to confirm capture is active, such as logs, debug stats, or a waveform/level indicator hook
 - summarize how the capture frames are exposed to the next layer
 ```
+
+used

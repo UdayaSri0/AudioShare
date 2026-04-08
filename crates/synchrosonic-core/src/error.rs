@@ -77,6 +77,24 @@ pub enum TransportError {
 
 #[derive(Debug, Error)]
 pub enum ReceiverError {
+    #[error("receiver mode is disabled: {0}")]
+    Disabled(String),
+    #[error("receiver configuration is invalid: {0}")]
+    InvalidConfig(String),
+    #[error("receiver transport event is invalid: {0}")]
+    InvalidTransport(String),
+    #[error("receiver playback backend is unavailable: {0}")]
+    PlaybackUnavailable(String),
+    #[error("failed to start receiver playback command `{command}`: {source}")]
+    PlaybackStart { command: String, source: io::Error },
+    #[error("receiver playback I/O failed while {context}: {source}")]
+    PlaybackIo { context: String, source: io::Error },
+    #[error("receiver runtime is not started")]
+    NotStarted,
+    #[error("receiver runtime channel is closed")]
+    ChannelClosed,
+    #[error("receiver runtime thread failed to join cleanly")]
+    ThreadJoin,
     #[error("receiver mode is not active in this build phase: {0}")]
     NotActive(String),
 }

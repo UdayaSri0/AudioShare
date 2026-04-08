@@ -985,7 +985,9 @@ dependencies = [
 name = "synchrosonic-receiver"
 version = "0.1.0"
 dependencies = [
+ "flume",
  "synchrosonic-core",
+ "tracing",
 ]
 
 [[package]]

@@ -12,7 +12,7 @@ pub use audio::{
     AudioDevice, AudioDeviceDirection, AudioFrame, AudioFrameStats, AudioSampleFormat,
     CaptureOutputs, CaptureSettings, CaptureState, CaptureStats,
 };
-pub use config::AppConfig;
+pub use config::{AppConfig, ConfigLoadReport, APP_CONFIG_SCHEMA_VERSION};
 pub use diagnostics::{DiagnosticEvent, DiagnosticLevel};
 pub use error::{AppError, AudioError, ConfigError, DiscoveryError, ReceiverError, TransportError};
 pub use models::{

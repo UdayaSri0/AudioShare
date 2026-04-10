@@ -941,11 +941,14 @@ version = "0.1.0"
 dependencies = [
  "gtk4",
  "libadwaita",
+ "serde",
+ "serde_json",
  "synchrosonic-audio",
  "synchrosonic-core",
  "synchrosonic-discovery",
  "synchrosonic-receiver",
  "synchrosonic-transport",
+ "tempfile",
  "tracing",
  "tracing-subscriber",
 ]

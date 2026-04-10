@@ -12,13 +12,18 @@ use gtk::{Align, Orientation};
 use synchrosonic_audio::LinuxAudioBackend;
 use synchrosonic_core::{
     services::{AudioBackend, DiscoveryService, ReceiverService},
-    AppConfig, AppState, AudioSource, AudioSourceKind, DeviceId, DiagnosticEvent, DiagnosticLevel,
-    DiscoveredDevice, PlaybackTarget, PlaybackTargetKind, QualityPreset, ReceiverLatencyPreset,
-    StreamTargetSnapshot,
+    AppConfig, AppState, AudioSource, AudioSourceKind, ConfigLoadReport, DeviceId, DiagnosticEvent,
+    DiagnosticLevel, DiscoveredDevice, PlaybackTarget, PlaybackTargetKind, QualityPreset,
+    ReceiverLatencyPreset, StreamTargetSnapshot,
 };
 use synchrosonic_discovery::MdnsDiscoveryService;
 use synchrosonic_receiver::ReceiverRuntime;
 use synchrosonic_transport::{LanReceiverTransportServer, LanSenderSession, SenderTarget};
+
+use crate::{
+    logging::{LogStore, StructuredLogEntry},
+    persistence::{export_config, import_config, save_active_config, AppPaths},
+};
 
 const DEFAULT_PLAYBACK_TARGET_ID: &str = "__system_default_playback__";
 const SYSTEM_DEFAULT_OUTPUT_LABEL: &str = "System default output";
@@ -28,6 +33,14 @@ const QUALITY_HIGH_QUALITY_ID: &str = "quality_high_quality";
 const LATENCY_LOW_ID: &str = "latency_low";
 const LATENCY_BALANCED_ID: &str = "latency_balanced";
 const LATENCY_STABLE_ID: &str = "latency_stable";
+
+#[derive(Clone)]
+pub struct UiLaunchContext {
+    pub config: AppConfig,
+    pub startup_diagnostics: Vec<DiagnosticEvent>,
+    pub paths: AppPaths,
+    pub log_store: LogStore,
+}
 
 #[derive(Clone)]
 struct UiContext {
@@ -46,6 +59,8 @@ struct UiController {
     navigation: adw::ViewStack,
     widgets: UiWidgets,
     context: UiContext,
+    paths: AppPaths,
+    log_store: LogStore,
 }
 
 #[derive(Clone)]
@@ -119,9 +134,12 @@ struct ReceiverWidgets {
 #[derive(Clone)]
 struct DiagnosticsWidgets {
     summary_row: adw::ActionRow,
+    log_summary_row: adw::ActionRow,
     clear_button: gtk::Button,
     list_box: gtk::ListBox,
     empty_state: adw::StatusPage,
+    log_list_box: gtk::ListBox,
+    log_empty_state: adw::StatusPage,
 }
 
 #[derive(Clone)]
@@ -129,17 +147,25 @@ struct SettingsWidgets {
     quality_selector: gtk::ComboBoxText,
     theme_switch: gtk::Switch,
     verbose_logging_switch: gtk::Switch,
+    receiver_start_on_launch_switch: gtk::Switch,
     summary_row: adw::ActionRow,
     note_row: adw::ActionRow,
+    config_dir_row: adw::ActionRow,
+    state_dir_row: adw::ActionRow,
+    config_path_row: adw::ActionRow,
+    portable_config_row: adw::ActionRow,
+    log_path_row: adw::ActionRow,
+    import_button: gtk::Button,
+    export_button: gtk::Button,
 }
 
-pub fn build_main_window(app: &adw::Application) {
-    let mut config = AppConfig::default();
-    config.receiver.enabled = true;
+pub fn build_main_window(app: &adw::Application, launch: UiLaunchContext) {
+    let config = launch.config.clone();
     apply_color_scheme(config.ui.prefer_dark_theme);
 
     let audio_backend = LinuxAudioBackend::new();
     let mut state = AppState::new(config.clone());
+    state.diagnostics.extend(launch.startup_diagnostics.clone());
     refresh_audio_inventory(&audio_backend, &mut state);
 
     let mut discovery = MdnsDiscoveryService::new(
@@ -260,15 +286,20 @@ pub fn build_main_window(app: &adw::Application) {
             discovery_service_type: discovery.service_type().to_string(),
             discovery_started,
         },
+        paths: launch.paths.clone(),
+        log_store: launch.log_store.clone(),
     };
 
     refresh_ui(&controller);
     connect_navigation_buttons(&controller);
+    connect_navigation_persistence(&controller);
     connect_casting_controls(&controller);
     connect_audio_controls(&controller);
     connect_receiver_controls(&controller);
     connect_settings_controls(&controller);
     connect_diagnostics_controls(&controller);
+
+    restore_visible_page(&controller.navigation, &config.ui.last_view_name);
 
     tracing::info!(
         audio_backend = audio_backend.backend_name(),
@@ -282,6 +313,10 @@ pub fn build_main_window(app: &adw::Application) {
     start_receiver_poll(controller.clone());
     start_streaming_poll(controller.clone());
     start_audio_inventory_poll(controller.clone());
+
+    if config.receiver.start_on_launch {
+        start_receiver_mode(&controller);
+    }
 
     window.set_content(Some(&root));
     window.present();
@@ -319,6 +354,80 @@ fn connect_navigation_button(
     button.connect_clicked(move |_| {
         navigation.set_visible_child_name(page);
     });
+}
+
+fn connect_navigation_persistence(controller: &UiController) {
+    let controller = controller.clone();
+    let navigation = controller.navigation.clone();
+    navigation.connect_visible_child_name_notify(move |stack| {
+        let Some(visible_child_name) = stack.visible_child_name() else {
+            return;
+        };
+        if controller.state.borrow().config.ui.last_view_name == visible_child_name {
+            return;
+        }
+
+        controller
+            .state
+            .borrow_mut()
+            .set_last_view_name(visible_child_name.as_str());
+        persist_current_config(&controller, "settings", None);
+    });
+}
+
+fn restore_visible_page(navigation: &adw::ViewStack, page_name: &str) {
+    if is_known_view_name(page_name) {
+        navigation.set_visible_child_name(page_name);
+    } else {
+        navigation.set_visible_child_name("dashboard");
+    }
+}
+
+fn is_known_view_name(page_name: &str) -> bool {
+    matches!(
+        page_name,
+        "dashboard"
+            | "devices"
+            | "casting"
+            | "audio"
+            | "receiver"
+            | "diagnostics"
+            | "settings"
+            | "about"
+    )
+}
+
+fn persist_current_config(
+    controller: &UiController,
+    component: &str,
+    success_message: Option<String>,
+) {
+    let config = controller.state.borrow().config.clone();
+    match save_active_config(&controller.paths, &config) {
+        Ok(path) => {
+            if let Some(success_message) = success_message {
+                controller
+                    .state
+                    .borrow_mut()
+                    .diagnostics
+                    .push(DiagnosticEvent::info(
+                        component,
+                        format!("{success_message} Saved to {}.", path.display()),
+                    ));
+            }
+        }
+        Err(error) => controller
+            .state
+            .borrow_mut()
+            .diagnostics
+            .push(DiagnosticEvent::warning(
+                component,
+                format!(
+                    "Configuration could not be saved to {}: {error}",
+                    controller.paths.config_path.display()
+                ),
+            )),
+    }
 }
 
 fn connect_casting_controls(controller: &UiController) {
@@ -377,6 +486,7 @@ fn connect_casting_controls(controller: &UiController) {
                 }
             }
 
+            persist_current_config(&controller, "streaming", None);
             refresh_ui(&controller);
         });
     }
@@ -428,6 +538,7 @@ fn connect_casting_controls(controller: &UiController) {
                 }
             }
 
+            persist_current_config(&controller, "streaming", None);
             refresh_ui(&controller);
         });
     }
@@ -486,6 +597,7 @@ fn connect_audio_controls(controller: &UiController) {
             ));
         }
 
+        persist_current_config(&controller, "audio", None);
         refresh_ui(&controller);
     });
 }
@@ -543,6 +655,7 @@ fn connect_receiver_controls(controller: &UiController) {
                 }
             }
 
+            persist_current_config(&controller, "receiver", None);
             refresh_ui(&controller);
         });
     }
@@ -591,6 +704,7 @@ fn connect_receiver_controls(controller: &UiController) {
                 }
             }
 
+            persist_current_config(&controller, "receiver", None);
             refresh_ui(&controller);
         });
     }
@@ -655,6 +769,7 @@ fn connect_settings_controls(controller: &UiController) {
                 }
             }
 
+            persist_current_config(&controller, "settings", None);
             refresh_ui(&controller);
         });
     }
@@ -680,6 +795,7 @@ fn connect_settings_controls(controller: &UiController) {
                     ),
                 ));
             }
+            persist_current_config(&controller, "settings", None);
             refresh_ui(&controller);
         });
     }
@@ -695,7 +811,7 @@ fn connect_settings_controls(controller: &UiController) {
                 state.diagnostics.push(DiagnosticEvent::info(
                     "settings",
                     format!(
-                        "Verbose logging is now {} for this run.",
+                        "Verbose logging was set to {} and will apply on the next app launch.",
                         if verbose_logging {
                             "enabled"
                         } else {
@@ -704,7 +820,85 @@ fn connect_settings_controls(controller: &UiController) {
                     ),
                 ));
             }
+            persist_current_config(&controller, "settings", None);
             refresh_ui(&controller);
+        });
+    }
+
+    {
+        let controller = controller.clone();
+        let receiver_start_on_launch_switch = controller
+            .widgets
+            .settings
+            .receiver_start_on_launch_switch
+            .clone();
+        receiver_start_on_launch_switch.connect_active_notify(move |toggle| {
+            let start_on_launch = toggle.is_active();
+            {
+                let mut state = controller.state.borrow_mut();
+                state.set_receiver_start_on_launch(start_on_launch);
+                state.diagnostics.push(DiagnosticEvent::info(
+                    "settings",
+                    format!(
+                        "Receiver auto-start on launch is now {}.",
+                        if start_on_launch {
+                            "enabled"
+                        } else {
+                            "disabled"
+                        }
+                    ),
+                ));
+            }
+            persist_current_config(&controller, "settings", None);
+            refresh_ui(&controller);
+        });
+    }
+
+    {
+        let controller = controller.clone();
+        let export_button = controller.widgets.settings.export_button.clone();
+        export_button.connect_clicked(move |_| {
+            let config = controller.state.borrow().config.clone();
+            let message = match export_config(&controller.paths, &config) {
+                Ok(path) => DiagnosticEvent::info(
+                    "settings",
+                    format!(
+                        "Exported a portable configuration snapshot to {}.",
+                        path.display()
+                    ),
+                ),
+                Err(error) => DiagnosticEvent::warning(
+                    "settings",
+                    format!(
+                        "Portable configuration export to {} failed: {error}",
+                        controller.paths.portable_config_path.display()
+                    ),
+                ),
+            };
+            controller.state.borrow_mut().diagnostics.push(message);
+            refresh_ui(&controller);
+        });
+    }
+
+    {
+        let controller = controller.clone();
+        let import_button = controller.widgets.settings.import_button.clone();
+        import_button.connect_clicked(move |_| match import_config(&controller.paths) {
+            Ok(report) => apply_imported_config(&controller, report),
+            Err(error) => {
+                controller
+                    .state
+                    .borrow_mut()
+                    .diagnostics
+                    .push(DiagnosticEvent::warning(
+                        "settings",
+                        format!(
+                            "Portable configuration import from {} failed: {error}",
+                            controller.paths.portable_config_path.display()
+                        ),
+                    ));
+                refresh_ui(&controller);
+            }
         });
     }
 }
@@ -1102,6 +1296,17 @@ fn refresh_diagnostics_page(controller: &UiController, state: &AppState) {
             "{} info, {} warning, {} error event(s). Newest events appear first.",
             info_count, warning_count, error_count
         ));
+    let recent_logs = controller.log_store.snapshot_recent(60);
+    controller
+        .widgets
+        .diagnostics
+        .log_summary_row
+        .set_subtitle(&format!(
+            "{} structured log entr{} in memory. Log file: {}.",
+            recent_logs.len(),
+            if recent_logs.len() == 1 { "y" } else { "ies" },
+            controller.paths.log_path.display()
+        ));
 
     clear_list_box(&controller.widgets.diagnostics.list_box);
     let has_events = !state.diagnostics.is_empty();
@@ -1115,23 +1320,48 @@ fn refresh_diagnostics_page(controller: &UiController, state: &AppState) {
         .diagnostics
         .list_box
         .set_visible(has_events);
-    if !has_events {
-        return;
+    if has_events {
+        for event in state.diagnostics.iter().rev().take(60) {
+            let row = adw::ActionRow::new();
+            row.set_title(&format!(
+                "{} · {}",
+                diagnostic_level_label(event.level),
+                event.component
+            ));
+            row.set_subtitle(&format!(
+                "{} · {}",
+                format_unix_ms(event.timestamp_unix_ms),
+                event.message
+            ));
+
+            let icon = gtk::Image::from_icon_name(diagnostic_icon_name(event.level));
+            row.add_prefix(&icon);
+
+            controller.widgets.diagnostics.list_box.append(&row);
+        }
     }
 
-    for event in state.diagnostics.iter().rev().take(60) {
-        let row = adw::ActionRow::new();
-        row.set_title(&event.component);
-        row.set_subtitle(&event.message);
-
-        let icon = gtk::Image::from_icon_name(diagnostic_icon_name(event.level));
-        row.add_prefix(&icon);
-
-        let level_label = gtk::Label::new(Some(diagnostic_level_label(event.level)));
-        level_label.add_css_class("dim-label");
-        row.add_suffix(&level_label);
-
-        controller.widgets.diagnostics.list_box.append(&row);
+    clear_list_box(&controller.widgets.diagnostics.log_list_box);
+    let has_logs = !recent_logs.is_empty();
+    controller
+        .widgets
+        .diagnostics
+        .log_empty_state
+        .set_visible(!has_logs);
+    controller
+        .widgets
+        .diagnostics
+        .log_list_box
+        .set_visible(has_logs);
+    if has_logs {
+        for entry in recent_logs {
+            let row = adw::ActionRow::new();
+            row.set_title(&format!("{} · {}", entry.level, entry.target));
+            row.set_subtitle(&format_log_entry_subtitle(&entry));
+            let icon = gtk::Image::from_icon_name(log_icon_name(entry.level.as_str()));
+            row.add_prefix(&icon);
+            controller.widgets.diagnostics.log_list_box.append(&row);
+        }
     }
 }
 
@@ -1150,13 +1380,19 @@ fn refresh_settings_page(controller: &UiController, state: &AppState) {
         .settings
         .verbose_logging_switch
         .set_active(state.config.diagnostics.verbose_logging);
+    controller
+        .widgets
+        .settings
+        .receiver_start_on_launch_switch
+        .set_active(state.config.receiver.start_on_launch);
 
     controller
         .widgets
         .settings
         .summary_row
         .set_subtitle(&format!(
-            "Quality preset: {}. Theme: {}. Verbose logging: {}.",
+            "Schema v{}. Quality preset: {}. Theme: {}. Verbose logging next launch: {}. Receiver auto-start: {}.",
+            state.config.schema_version,
             format_quality_preset(state.config.transport.quality),
             if state.config.ui.prefer_dark_theme {
                 "prefer dark"
@@ -1167,10 +1403,56 @@ fn refresh_settings_page(controller: &UiController, state: &AppState) {
                 "enabled"
             } else {
                 "disabled"
+            },
+            if state.config.receiver.start_on_launch {
+                "enabled"
+            } else {
+                "disabled"
             }
         ));
+    controller
+        .widgets
+        .settings
+        .config_dir_row
+        .set_subtitle(&format!(
+            "{} (base directory, override with SYNCHROSONIC_CONFIG_DIR)",
+            controller.paths.config_dir.display()
+        ));
+    controller
+        .widgets
+        .settings
+        .state_dir_row
+        .set_subtitle(&format!(
+            "{} (base directory, override with SYNCHROSONIC_STATE_DIR)",
+            controller.paths.state_dir.display()
+        ));
+    controller
+        .widgets
+        .settings
+        .config_path_row
+        .set_subtitle(&format!(
+            "{} (active settings, schema v{})",
+            controller.paths.config_path.display(),
+            state.config.schema_version
+        ));
+    controller
+        .widgets
+        .settings
+        .portable_config_row
+        .set_subtitle(&format!(
+            "{} (import/export target)",
+            controller.paths.portable_config_path.display()
+        ));
+    controller
+        .widgets
+        .settings
+        .log_path_row
+        .set_subtitle(&format!(
+            "{} (structured JSON lines)",
+            controller.paths.log_path.display()
+        ));
     controller.widgets.settings.note_row.set_subtitle(
-        "Settings are live for the current run. Persistent settings and retained log storage are planned for the next phase.",
+        "Settings save automatically. Theme changes apply immediately, audio/cast preferences apply safely to the current or next session as supported, and verbose logging changes take effect on the next launch.",
     );
 }
 
@@ -1438,6 +1720,113 @@ fn stop_receiver_mode(controller: &UiController) {
         }
     }
 
+    refresh_ui(controller);
+}
+
+fn apply_imported_config(controller: &UiController, report: ConfigLoadReport) {
+    let ConfigLoadReport {
+        config: imported_config,
+        warnings,
+        ..
+    } = report;
+
+    apply_color_scheme(imported_config.ui.prefer_dark_theme);
+
+    let (quality_result, local_target_result, local_enabled_result, sender_snapshot) = {
+        let mut sender = controller.sender.lock().expect("sender session mutex");
+        let quality_result = sender.set_quality_preset(imported_config.transport.quality);
+        let local_target_result = sender
+            .set_local_playback_target(imported_config.audio.local_playback_target_id.clone());
+        let local_enabled_result =
+            sender.set_local_playback_enabled(imported_config.audio.local_playback_enabled);
+        let sender_snapshot = sender.snapshot();
+        (
+            quality_result,
+            local_target_result,
+            local_enabled_result,
+            sender_snapshot,
+        )
+    };
+
+    let (receiver_target_result, receiver_latency_result, receiver_snapshot) = {
+        let mut receiver = controller.receiver.lock().expect("receiver runtime mutex");
+        let receiver_target_result =
+            receiver.set_playback_target(imported_config.receiver.playback_target_id.clone());
+        let receiver_latency_result =
+            receiver.set_latency_preset(imported_config.receiver.latency_preset);
+        let receiver_snapshot = receiver.snapshot();
+        (
+            receiver_target_result,
+            receiver_latency_result,
+            receiver_snapshot,
+        )
+    };
+
+    {
+        let mut state = controller.state.borrow_mut();
+        let audio_sources = state.audio_sources.clone();
+        state.config = imported_config.clone();
+        state.selected_audio_source_id = imported_config.audio.preferred_source_id.clone();
+        state.set_audio_sources(audio_sources);
+        state.apply_streaming_snapshot(sender_snapshot);
+        state.apply_receiver_snapshot(receiver_snapshot);
+        state.set_receiver_start_on_launch(imported_config.receiver.start_on_launch);
+        state.set_last_view_name(imported_config.ui.last_view_name.clone());
+
+        state.diagnostics.push(DiagnosticEvent::info(
+            "settings",
+            format!(
+                "Imported portable configuration from {}.",
+                controller.paths.portable_config_path.display()
+            ),
+        ));
+        for warning in warnings {
+            state
+                .diagnostics
+                .push(DiagnosticEvent::warning("settings", warning));
+        }
+        if let Err(error) = quality_result {
+            state.diagnostics.push(DiagnosticEvent::warning(
+                "settings",
+                format!("Imported sender quality preset could not be applied immediately: {error}"),
+            ));
+        }
+        if let Err(error) = local_target_result {
+            state.diagnostics.push(DiagnosticEvent::warning(
+                "settings",
+                format!("Imported local playback target could not be applied immediately: {error}"),
+            ));
+        }
+        if let Err(error) = local_enabled_result {
+            state.diagnostics.push(DiagnosticEvent::warning(
+                "settings",
+                format!("Imported local mirror state could not be applied immediately: {error}"),
+            ));
+        }
+        if let Err(error) = receiver_target_result {
+            state.diagnostics.push(DiagnosticEvent::warning(
+                "settings",
+                format!(
+                    "Imported receiver playback target could not be applied immediately: {error}"
+                ),
+            ));
+        }
+        if let Err(error) = receiver_latency_result {
+            state.diagnostics.push(DiagnosticEvent::warning(
+                "settings",
+                format!(
+                    "Imported receiver latency preset will apply on a later receiver start: {error}"
+                ),
+            ));
+        }
+    }
+
+    restore_visible_page(&controller.navigation, &imported_config.ui.last_view_name);
+    persist_current_config(
+        controller,
+        "settings",
+        Some("Portable configuration became the active saved configuration.".to_string()),
+    );
     refresh_ui(controller);
 }
 
@@ -1761,33 +2150,49 @@ fn diagnostics_page() -> (gtk::ScrolledWindow, DiagnosticsWidgets) {
 
     let summary_group = preferences_group(
         "Diagnostic summary",
-        Some("Clear the in-memory event list when you want a quieter view of the next action."),
+        Some("Diagnostics capture state transitions; structured logs show traced application events."),
     );
-    let summary_row = summary_row("Recent diagnostic volume");
-    summary_group.add(&summary_row);
+    let diagnostic_summary_row = summary_row("Recent diagnostic volume");
+    let log_summary_row = summary_row("Structured log viewer");
+    summary_group.add(&diagnostic_summary_row);
+    summary_group.add(&log_summary_row);
     content.append(&summary_group);
 
     let clear_button = gtk::Button::with_label("Clear diagnostics");
     content.append(&clear_button);
 
     let diagnostics_section = section_box("Recent events");
-    let empty_state = empty_state(
+    let diagnostics_empty_state = empty_state(
         "No diagnostics recorded",
         "Live state changes and warnings will appear here once the app does work.",
         "dialog-information-symbolic",
     );
     let list_box = boxed_list();
-    diagnostics_section.append(&empty_state);
+    diagnostics_section.append(&diagnostics_empty_state);
     diagnostics_section.append(&list_box);
     content.append(&diagnostics_section);
+
+    let logs_section = section_box("Recent structured logs");
+    let log_empty_state = empty_state(
+        "No structured logs captured yet",
+        "Tracing events from this app run will appear here, and the JSON-lines log file will keep them on disk.",
+        "text-x-log-symbolic",
+    );
+    let log_list_box = boxed_list();
+    logs_section.append(&log_empty_state);
+    logs_section.append(&log_list_box);
+    content.append(&logs_section);
 
     (
         page,
         DiagnosticsWidgets {
-            summary_row,
+            summary_row: diagnostic_summary_row,
+            log_summary_row,
             clear_button,
             list_box,
-            empty_state,
+            empty_state: diagnostics_empty_state,
+            log_list_box,
+            log_empty_state,
         },
     )
 }
@@ -1817,17 +2222,40 @@ fn settings_page() -> (gtk::ScrolledWindow, SettingsWidgets) {
     let verbose_logging_switch = gtk::Switch::new();
     let logging_row = control_row(
         "Verbose logging",
-        "Keep additional detail enabled for the current run.",
+        "Persist a debug-level logging preference for the next app launch.",
         &verbose_logging_switch,
     );
+    let receiver_start_on_launch_switch = gtk::Switch::new();
+    let receiver_start_on_launch_row = control_row(
+        "Auto-start receiver on launch",
+        "Start receiver mode automatically after the app restores its saved configuration.",
+        &receiver_start_on_launch_switch,
+    );
     let summary_status_row = summary_row("Current configuration");
+    let config_dir_row = summary_row("Config directory");
+    let state_dir_row = summary_row("State directory");
+    let config_path_row = summary_row("Active config file");
+    let portable_config_row = summary_row("Portable config file");
+    let log_path_row = summary_row("Structured log file");
     let note_status_row = summary_row("Next phase");
+    let import_export_buttons = gtk::Box::new(Orientation::Horizontal, 12);
+    let import_button = gtk::Button::with_label("Import portable config");
+    let export_button = gtk::Button::with_label("Export portable config");
+    import_export_buttons.append(&import_button);
+    import_export_buttons.append(&export_button);
     settings_group.add(&quality_row);
     settings_group.add(&theme_row);
     settings_group.add(&logging_row);
+    settings_group.add(&receiver_start_on_launch_row);
     settings_group.add(&summary_status_row);
+    settings_group.add(&config_dir_row);
+    settings_group.add(&state_dir_row);
+    settings_group.add(&config_path_row);
+    settings_group.add(&portable_config_row);
+    settings_group.add(&log_path_row);
     settings_group.add(&note_status_row);
     content.append(&settings_group);
+    content.append(&import_export_buttons);
 
     (
         page,
@@ -1835,8 +2263,16 @@ fn settings_page() -> (gtk::ScrolledWindow, SettingsWidgets) {
             quality_selector,
             theme_switch,
             verbose_logging_switch,
+            receiver_start_on_launch_switch,
             summary_row: summary_status_row,
             note_row: note_status_row,
+            config_dir_row,
+            state_dir_row,
+            config_path_row,
+            portable_config_row,
+            log_path_row,
+            import_button,
+            export_button,
         },
     )
 }
@@ -1963,6 +2399,12 @@ fn empty_state(title: &str, description: &str, icon_name: &str) -> adw::StatusPa
 
 fn start_discovery_poll(mut discovery: MdnsDiscoveryService, controller: UiController) {
     glib::timeout_add_seconds_local(1, move || {
+        let previous_selected_receiver = controller
+            .state
+            .borrow()
+            .selected_receiver_device_id
+            .clone();
+
         loop {
             match discovery.poll_event() {
                 Ok(Some(event)) => controller.state.borrow_mut().apply_discovery_event(event),
@@ -2001,6 +2443,33 @@ fn start_discovery_poll(mut discovery: MdnsDiscoveryService, controller: UiContr
             .state
             .borrow_mut()
             .apply_discovery_snapshot(discovery.snapshot());
+        let current_selected_receiver = controller
+            .state
+            .borrow()
+            .selected_receiver_device_id
+            .clone();
+        if previous_selected_receiver != current_selected_receiver {
+            let message = match (previous_selected_receiver, current_selected_receiver) {
+                (Some(previous), Some(current)) => Some(DiagnosticEvent::warning(
+                    "discovery",
+                    format!(
+                        "Selected receiver {} disappeared; switched selection to {}.",
+                        previous, current
+                    ),
+                )),
+                (Some(previous), None) => Some(DiagnosticEvent::warning(
+                    "discovery",
+                    format!(
+                        "Selected receiver {} disappeared and no replacement receiver is available.",
+                        previous
+                    ),
+                )),
+                _ => None,
+            };
+            if let Some(message) = message {
+                controller.state.borrow_mut().diagnostics.push(message);
+            }
+        }
         refresh_ui(&controller);
         ControlFlow::Continue
     });
@@ -2186,12 +2655,14 @@ fn start_audio_inventory_poll(controller: UiController) {
             Ok(sources) => {
                 last_source_error = None;
                 let mut source_change_message = None::<DiagnosticEvent>;
+                let mut source_selection_changed = false;
                 {
                     let mut state = controller.state.borrow_mut();
                     let previous_selected = state.selected_audio_source_id.clone();
                     let previous_sources = state.audio_sources.len();
                     state.set_audio_sources(sources);
                     if previous_selected != state.selected_audio_source_id {
+                        source_selection_changed = true;
                         source_change_message = Some(DiagnosticEvent::warning(
                             "audio",
                             format!(
@@ -2212,6 +2683,9 @@ fn start_audio_inventory_poll(controller: UiController) {
                     if let Some(message) = source_change_message.take() {
                         state.diagnostics.push(message);
                     }
+                }
+                if source_selection_changed {
+                    persist_current_config(&controller, "audio", None);
                 }
             }
             Err(error) => {
@@ -3040,6 +3514,45 @@ fn diagnostic_level_label(level: DiagnosticLevel) -> &'static str {
         DiagnosticLevel::Warning => "Warning",
         DiagnosticLevel::Error => "Error",
     }
+}
+
+fn log_icon_name(level: &str) -> &'static str {
+    match level {
+        "ERROR" => "dialog-error-symbolic",
+        "WARN" => "dialog-warning-symbolic",
+        _ => "text-x-log-symbolic",
+    }
+}
+
+fn format_log_entry_subtitle(entry: &StructuredLogEntry) -> String {
+    let field_summary = if entry.fields.is_empty() {
+        String::new()
+    } else {
+        let summary = entry
+            .fields
+            .iter()
+            .filter(|(key, _)| key.as_str() != "message")
+            .take(3)
+            .map(|(key, value)| format!("{key}={value}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        if summary.is_empty() {
+            String::new()
+        } else {
+            format!(" [{summary}]")
+        }
+    };
+
+    format!(
+        "{} · {}{}",
+        format_unix_ms(entry.timestamp_unix_ms),
+        entry.message,
+        field_summary
+    )
+}
+
+fn format_unix_ms(timestamp_unix_ms: u64) -> String {
+    format!("{timestamp_unix_ms} ms")
 }
 
 fn clear_list_box(list_box: &gtk::ListBox) {

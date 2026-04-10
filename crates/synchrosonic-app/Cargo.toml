@@ -10,10 +10,13 @@ authors.workspace = true
 [dependencies]
 adw.workspace = true
 gtk.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 synchrosonic-audio = { path = "../synchrosonic-audio" }
 synchrosonic-core = { path = "../synchrosonic-core" }
 synchrosonic-discovery = { path = "../synchrosonic-discovery" }
 synchrosonic-receiver = { path = "../synchrosonic-receiver" }
 synchrosonic-transport = { path = "../synchrosonic-transport" }
+tempfile.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

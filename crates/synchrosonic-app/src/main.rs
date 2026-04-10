@@ -1,20 +1,37 @@
+mod logging;
+mod persistence;
 mod ui;
 
 use adw::prelude::*;
-use tracing_subscriber::{fmt, EnvFilter};
+use synchrosonic_core::DiagnosticEvent;
+
+use crate::{
+    logging::init_logging,
+    persistence::{load_startup_config, AppPaths},
+};
 
 fn main() -> gtk::glib::ExitCode {
-    init_logging();
+    let startup = load_startup_config(AppPaths::resolve());
+    let logging = init_logging(
+        startup.config.diagnostics.verbose_logging,
+        &startup.paths.log_path,
+    );
+    let mut startup_diagnostics = startup.diagnostics;
+    for warning in logging.warnings {
+        startup_diagnostics.push(DiagnosticEvent::warning("logging", warning));
+    }
+
+    let launch = ui::UiLaunchContext {
+        config: startup.config,
+        startup_diagnostics,
+        paths: startup.paths,
+        log_store: logging.store,
+    };
 
     let app = adw::Application::builder()
         .application_id("org.synchrosonic.SynchroSonic")
         .build();
 
-    app.connect_activate(ui::build_main_window);
+    app.connect_activate(move |app| ui::build_main_window(app, launch.clone()));
     app.run()
-}
-
-fn init_logging() {
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-    let _ = fmt().with_env_filter(filter).try_init();
 }

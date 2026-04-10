@@ -59,11 +59,11 @@ impl AppState {
             receiver,
             streaming,
             selected_receiver_device_id: None,
+            selected_audio_source_id: config.audio.preferred_source_id.clone(),
             config,
             cast_session: CastSessionState::Idle,
             capture_state: CaptureState::Idle,
             audio_sources: Vec::new(),
-            selected_audio_source_id: None,
             playback_targets: Vec::new(),
             devices: Vec::new(),
             discovered_devices: Vec::new(),
@@ -141,8 +141,16 @@ impl AppState {
         self.config.ui.prefer_dark_theme = prefer_dark_theme;
     }
 
+    pub fn set_last_view_name(&mut self, last_view_name: impl Into<String>) {
+        self.config.ui.last_view_name = last_view_name.into();
+    }
+
     pub fn set_verbose_logging(&mut self, verbose_logging: bool) {
         self.config.diagnostics.verbose_logging = verbose_logging;
+    }
+
+    pub fn set_receiver_start_on_launch(&mut self, start_on_launch: bool) {
+        self.config.receiver.start_on_launch = start_on_launch;
     }
 
     pub fn clear_diagnostics(&mut self) {

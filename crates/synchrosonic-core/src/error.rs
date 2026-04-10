@@ -25,6 +25,14 @@ pub enum ConfigError {
         path: PathBuf,
         source: toml::de::Error,
     },
+    #[error(
+        "config at {path} uses schema version {found}, but this build supports up to {supported}"
+    )]
+    UnsupportedVersion {
+        path: PathBuf,
+        found: u32,
+        supported: u32,
+    },
     #[error("failed to serialize config: {0}")]
     Serialize(toml::ser::Error),
     #[error("failed to write config at {path}: {source}")]

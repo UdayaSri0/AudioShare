@@ -7,8 +7,9 @@ use std::{
 use flume::{Receiver, RecvTimeoutError, Sender};
 use synchrosonic_core::{
     config::ReceiverConfig, services::ReceiverService, ReceiverConnectionInfo, ReceiverError,
-    ReceiverLatencyProfile, ReceiverMetrics, ReceiverServiceState, ReceiverSnapshot,
-    ReceiverStreamConfig, ReceiverSyncSnapshot, ReceiverSyncState, ReceiverTransportEvent,
+    ReceiverLatencyPreset, ReceiverLatencyProfile, ReceiverMetrics, ReceiverServiceState,
+    ReceiverSnapshot, ReceiverStreamConfig, ReceiverSyncSnapshot, ReceiverSyncState,
+    ReceiverTransportEvent,
 };
 
 use crate::{
@@ -70,6 +71,26 @@ impl ReceiverRuntime {
             if snapshot.state == ReceiverServiceState::Idle {
                 snapshot.last_error = None;
             }
+        }
+
+        Ok(())
+    }
+
+    pub fn set_latency_preset(
+        &mut self,
+        latency_preset: ReceiverLatencyPreset,
+    ) -> Result<(), ReceiverError> {
+        if self.command_tx.is_some() {
+            return Err(ReceiverError::InvalidConfig(
+                "changing the receiver latency preset while receiver mode is active is not supported yet".to_string(),
+            ));
+        }
+
+        self.config.latency_preset = latency_preset;
+        let mut snapshot = ReceiverSnapshot::from_config(&self.config);
+        snapshot.playback_backend = Some(self.playback_engine.backend_name().to_string());
+        if let Ok(mut guard) = self.snapshot.lock() {
+            *guard = snapshot;
         }
 
         Ok(())
@@ -787,6 +808,23 @@ mod tests {
             runtime.snapshot().playback_target_id.as_deref(),
             Some("bluez_output.11_22_33_44_55_66.a2dp-sink")
         );
+    }
+
+    #[test]
+    fn runtime_updates_latency_preset_before_start() {
+        let engine = Arc::new(MockPlaybackEngine {
+            writes: Arc::new(AtomicUsize::new(0)),
+        });
+        let mut runtime = ReceiverRuntime::with_playback_engine(ReceiverConfig::default(), engine);
+
+        runtime
+            .set_latency_preset(ReceiverLatencyPreset::Stable)
+            .expect("latency preset should update");
+
+        let snapshot = runtime.snapshot();
+        assert_eq!(snapshot.latency_preset, ReceiverLatencyPreset::Stable);
+        assert_eq!(snapshot.sync.expected_output_latency_ms, 230);
+        assert_eq!(snapshot.buffer.target_buffer_ms, 120);
     }
 
     #[test]

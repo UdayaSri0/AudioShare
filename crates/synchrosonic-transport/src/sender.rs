@@ -12,8 +12,8 @@ use synchrosonic_audio::{LinuxPlaybackEngine, PlaybackEngine, PlaybackStartReque
 use synchrosonic_core::{
     config::TransportConfig,
     services::{AudioBackend, AudioCapture},
-    AudioError, CaptureSettings, DeviceId, LocalMirrorState, ReceiverStreamConfig, StreamCodec,
-    StreamMetrics, StreamSessionSnapshot, StreamSessionState, StreamTargetHealth,
+    AudioError, CaptureSettings, DeviceId, LocalMirrorState, QualityPreset, ReceiverStreamConfig,
+    StreamCodec, StreamMetrics, StreamSessionSnapshot, StreamSessionState, StreamTargetHealth,
     StreamTargetSnapshot, TransportEndpoint, TransportError,
 };
 
@@ -219,6 +219,18 @@ impl LanSenderSession {
         Ok(())
     }
 
+    pub fn set_quality_preset(&mut self, quality: QualityPreset) -> Result<(), TransportError> {
+        self.config.quality = quality;
+
+        if let Some(control_tx) = &self.control_tx {
+            control_tx
+                .send(SenderCommand::SetQualityPreset(quality))
+                .map_err(|_| TransportError::ChannelClosed)?;
+        }
+
+        Ok(())
+    }
+
     pub fn stop(&mut self) -> Result<(), TransportError> {
         if let Some(control_tx) = self.control_tx.take() {
             let _ = control_tx.send(SenderCommand::Shutdown);
@@ -249,6 +261,7 @@ enum SenderCommand {
     RemoveTarget(DeviceId),
     SetLocalMirrorEnabled(bool),
     SetLocalMirrorTarget(Option<String>),
+    SetQualityPreset(QualityPreset),
     Shutdown,
 }
 
@@ -959,6 +972,10 @@ where
                             self.shared_snapshot.local_mirror.last_error = Some(error.to_string());
                         }
                     }
+                }
+                SenderCommand::SetQualityPreset(quality) => {
+                    self.config.quality = quality;
+                    self.connect_request.quality = quality;
                 }
                 SenderCommand::Shutdown => {
                     self.shared_snapshot.state = StreamSessionState::Stopping;

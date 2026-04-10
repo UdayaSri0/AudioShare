@@ -12,8 +12,9 @@ use gtk::{Align, Orientation};
 use synchrosonic_audio::LinuxAudioBackend;
 use synchrosonic_core::{
     services::{AudioBackend, DiscoveryService, ReceiverService},
-    AppConfig, AppState, AudioSourceKind, DeviceId, DiagnosticEvent, DiscoveredDevice,
-    PlaybackTarget, PlaybackTargetKind, StreamTargetSnapshot,
+    AppConfig, AppState, AudioSource, AudioSourceKind, DeviceId, DiagnosticEvent, DiagnosticLevel,
+    DiscoveredDevice, PlaybackTarget, PlaybackTargetKind, QualityPreset, ReceiverLatencyPreset,
+    StreamTargetSnapshot,
 };
 use synchrosonic_discovery::MdnsDiscoveryService;
 use synchrosonic_receiver::ReceiverRuntime;
@@ -21,73 +22,142 @@ use synchrosonic_transport::{LanReceiverTransportServer, LanSenderSession, Sende
 
 const DEFAULT_PLAYBACK_TARGET_ID: &str = "__system_default_playback__";
 const SYSTEM_DEFAULT_OUTPUT_LABEL: &str = "System default output";
+const QUALITY_LOW_LATENCY_ID: &str = "quality_low_latency";
+const QUALITY_BALANCED_ID: &str = "quality_balanced";
+const QUALITY_HIGH_QUALITY_ID: &str = "quality_high_quality";
+const LATENCY_LOW_ID: &str = "latency_low";
+const LATENCY_BALANCED_ID: &str = "latency_balanced";
+const LATENCY_STABLE_ID: &str = "latency_stable";
+
+#[derive(Clone)]
+struct UiContext {
+    audio_backend_name: String,
+    discovery_service_type: String,
+    discovery_started: bool,
+}
+
+#[derive(Clone)]
+struct UiController {
+    state: Rc<RefCell<AppState>>,
+    audio_backend: LinuxAudioBackend,
+    sender: Arc<Mutex<LanSenderSession>>,
+    receiver: Arc<Mutex<ReceiverRuntime>>,
+    receiver_transport: Arc<Mutex<LanReceiverTransportServer>>,
+    navigation: adw::ViewStack,
+    widgets: UiWidgets,
+    context: UiContext,
+}
+
+#[derive(Clone)]
+struct UiWidgets {
+    dashboard: DashboardWidgets,
+    discovery: DiscoveryWidgets,
+    casting: CastingWidgets,
+    audio: AudioWidgets,
+    receiver: ReceiverWidgets,
+    diagnostics: DiagnosticsWidgets,
+    settings: SettingsWidgets,
+}
+
+#[derive(Clone)]
+struct DashboardWidgets {
+    session_row: adw::ActionRow,
+    discovery_row: adw::ActionRow,
+    casting_row: adw::ActionRow,
+    audio_row: adw::ActionRow,
+    detail_label: gtk::Label,
+    open_devices_button: gtk::Button,
+    open_casting_button: gtk::Button,
+    open_audio_button: gtk::Button,
+    open_receiver_button: gtk::Button,
+}
+
+#[derive(Clone)]
+struct DiscoveryWidgets {
+    summary_row: adw::ActionRow,
+    device_list: gtk::ListBox,
+    empty_state: adw::StatusPage,
+}
+
+#[derive(Clone)]
+struct CastingWidgets {
+    receiver_selector: gtk::ComboBoxText,
+    add_button: gtk::Button,
+    stop_all_button: gtk::Button,
+    local_mirror_switch: gtk::Switch,
+    local_output_selector: gtk::ComboBoxText,
+    session_row: adw::ActionRow,
+    mirror_row: adw::ActionRow,
+    target_list: gtk::ListBox,
+    empty_state: adw::StatusPage,
+    detail_label: gtk::Label,
+}
+
+#[derive(Clone)]
+struct AudioWidgets {
+    source_selector: gtk::ComboBoxText,
+    current_source_row: adw::ActionRow,
+    output_row: adw::ActionRow,
+    source_list: gtk::ListBox,
+    output_list: gtk::ListBox,
+    sources_empty_state: adw::StatusPage,
+    outputs_empty_state: adw::StatusPage,
+}
+
+#[derive(Clone)]
+struct ReceiverWidgets {
+    latency_selector: gtk::ComboBoxText,
+    output_selector: gtk::ComboBoxText,
+    start_button: gtk::Button,
+    stop_button: gtk::Button,
+    state_row: adw::ActionRow,
+    connection_row: adw::ActionRow,
+    sync_row: adw::ActionRow,
+    detail_label: gtk::Label,
+}
+
+#[derive(Clone)]
+struct DiagnosticsWidgets {
+    summary_row: adw::ActionRow,
+    clear_button: gtk::Button,
+    list_box: gtk::ListBox,
+    empty_state: adw::StatusPage,
+}
+
+#[derive(Clone)]
+struct SettingsWidgets {
+    quality_selector: gtk::ComboBoxText,
+    theme_switch: gtk::Switch,
+    verbose_logging_switch: gtk::Switch,
+    summary_row: adw::ActionRow,
+    note_row: adw::ActionRow,
+}
 
 pub fn build_main_window(app: &adw::Application) {
     let mut config = AppConfig::default();
     config.receiver.enabled = true;
-    let mut state = AppState::new(config.clone());
+    apply_color_scheme(config.ui.prefer_dark_theme);
+
     let audio_backend = LinuxAudioBackend::new();
-    let audio_source_summary = match audio_backend.list_sources() {
-        Ok(sources) => {
-            let source_count = sources.len();
-            let selected = sources
-                .iter()
-                .find(|source| source.is_default && source.kind == AudioSourceKind::Monitor)
-                .or_else(|| sources.iter().find(|source| source.is_default))
-                .or_else(|| sources.first())
-                .map(|source| source.display_name.clone())
-                .unwrap_or_else(|| "No source selected".to_string());
-            state.set_audio_sources(sources);
-            format!("{source_count} capture source(s) available. Selected: {selected}")
-        }
-        Err(error) => {
-            let message = format!("PipeWire source enumeration failed: {error}");
-            state
-                .diagnostics
-                .push(DiagnosticEvent::warning("audio", message.clone()));
-            message
-        }
-    };
-    let playback_target_summary = match audio_backend.list_playback_targets() {
-        Ok(targets) => {
-            let target_count = targets.len();
-            let bluetooth_count = targets
-                .iter()
-                .filter(|target| target.is_bluetooth())
-                .count();
-            let default_target = targets
-                .iter()
-                .find(|target| target.is_default)
-                .map(|target| target.display_name.clone())
-                .unwrap_or_else(|| SYSTEM_DEFAULT_OUTPUT_LABEL.to_string());
-            state.set_playback_targets(targets);
-            format!(
-                "{target_count} playback output(s) available, {bluetooth_count} Bluetooth. Default target: {default_target}"
-            )
-        }
-        Err(error) => {
-            let message = format!("PipeWire playback target enumeration failed: {error}");
-            state
-                .diagnostics
-                .push(DiagnosticEvent::warning("audio", message.clone()));
-            message
-        }
-    };
+    let mut state = AppState::new(config.clone());
+    refresh_audio_inventory(&audio_backend, &mut state);
+
     let mut discovery = MdnsDiscoveryService::new(
         config.discovery.clone(),
         config.receiver.advertised_name.clone(),
     );
-    let discovery_summary = match discovery.start() {
-        Ok(()) => format!("mDNS discovery active on {}", discovery.service_type()),
+    let discovery_started = match discovery.start() {
+        Ok(()) => true,
         Err(error) => {
-            let message = format!("mDNS discovery failed to start: {error}");
-            state
-                .diagnostics
-                .push(DiagnosticEvent::warning("discovery", message.clone()));
-            message
+            state.diagnostics.push(DiagnosticEvent::warning(
+                "discovery",
+                format!("mDNS discovery failed to start: {error}"),
+            ));
+            false
         }
     };
     state.apply_discovery_snapshot(discovery.snapshot());
+
     let receiver = Arc::new(Mutex::new(ReceiverRuntime::new(config.receiver.clone())));
     let receiver_transport = Arc::new(Mutex::new(LanReceiverTransportServer::new(
         receiver_bind_addr(&config),
@@ -96,10 +166,11 @@ pub fn build_main_window(app: &adw::Application) {
         config.transport.heartbeat_interval_ms,
     )));
     let sender = Arc::new(Mutex::new(LanSenderSession::new(config.transport.clone())));
-    let _ = sender
-        .lock()
-        .expect("sender session mutex")
-        .set_local_playback_target(config.audio.local_playback_target_id.clone());
+    {
+        let mut sender = sender.lock().expect("sender session mutex");
+        let _ = sender.set_local_playback_target(config.audio.local_playback_target_id.clone());
+        let _ = sender.set_quality_preset(config.transport.quality);
+    }
     state.apply_receiver_snapshot(receiver.lock().expect("receiver runtime mutex").snapshot());
     state.apply_streaming_snapshot(sender.lock().expect("sender session mutex").snapshot());
     let state = Rc::new(RefCell::new(state));
@@ -107,771 +178,1798 @@ pub fn build_main_window(app: &adw::Application) {
     let window = adw::ApplicationWindow::builder()
         .application(app)
         .title("SynchroSonic")
-        .default_width(1080)
-        .default_height(720)
+        .default_width(1240)
+        .default_height(860)
         .build();
 
-    let root = gtk::Box::new(Orientation::Vertical, 0);
     let header = gtk::HeaderBar::new();
-    let title = gtk::Label::new(Some("SynchroSonic"));
-    title.add_css_class("title-2");
-    header.set_title_widget(Some(&title));
+    let brand = gtk::Box::new(Orientation::Vertical, 0);
+    let brand_title = gtk::Label::new(Some("SynchroSonic"));
+    brand_title.add_css_class("title-4");
+    brand_title.set_halign(Align::Start);
+    let brand_subtitle = gtk::Label::new(Some("Linux-native LAN audio casting"));
+    brand_subtitle.add_css_class("dim-label");
+    brand_subtitle.set_halign(Align::Start);
+    brand.append(&brand_title);
+    brand.append(&brand_subtitle);
+    header.pack_start(&brand);
+
+    let navigation = adw::ViewStack::new();
+    navigation.set_hexpand(true);
+    navigation.set_vexpand(true);
+
+    let switcher = adw::ViewSwitcher::new();
+    switcher.set_stack(Some(&navigation));
+    header.set_title_widget(Some(&switcher));
+    let switcher_bar = adw::ViewSwitcherBar::new();
+    switcher_bar.set_stack(Some(&navigation));
+    switcher_bar.set_reveal(true);
+
+    let root = gtk::Box::new(Orientation::Vertical, 0);
     root.append(&header);
+    root.append(&navigation);
+    root.append(&switcher_bar);
 
-    let body = gtk::Box::new(Orientation::Horizontal, 12);
-    body.set_margin_top(12);
-    body.set_margin_bottom(12);
-    body.set_margin_start(12);
-    body.set_margin_end(12);
+    let (dashboard_page, dashboard) = dashboard_page();
+    let dashboard_stack_page =
+        navigation.add_titled(&dashboard_page, Some("dashboard"), "Dashboard");
+    dashboard_stack_page.set_icon_name(Some("go-home-symbolic"));
+    let (discovery_page, discovery_widgets) = discovery_page();
+    let discovery_stack_page = navigation.add_titled(&discovery_page, Some("devices"), "Devices");
+    discovery_stack_page.set_icon_name(Some("network-workgroup-symbolic"));
+    let (casting_page, casting_widgets) = casting_page();
+    let casting_stack_page = navigation.add_titled(&casting_page, Some("casting"), "Casting");
+    casting_stack_page.set_icon_name(Some("media-playback-start-symbolic"));
+    let (audio_page, audio_widgets) = audio_page();
+    let audio_stack_page = navigation.add_titled(&audio_page, Some("audio"), "Audio");
+    audio_stack_page.set_icon_name(Some("audio-card-symbolic"));
+    let (receiver_page, receiver_widgets) = receiver_page();
+    let receiver_stack_page = navigation.add_titled(&receiver_page, Some("receiver"), "Receiver");
+    receiver_stack_page.set_icon_name(Some("audio-speakers-symbolic"));
+    let (diagnostics_page, diagnostics_widgets) = diagnostics_page();
+    let diagnostics_stack_page =
+        navigation.add_titled(&diagnostics_page, Some("diagnostics"), "Diagnostics");
+    diagnostics_stack_page.set_icon_name(Some("utilities-terminal-symbolic"));
+    let (settings_page, settings_widgets) = settings_page();
+    let settings_stack_page = navigation.add_titled(&settings_page, Some("settings"), "Settings");
+    settings_stack_page.set_icon_name(Some("emblem-system-symbolic"));
+    let about_page = about_page();
+    let about_stack_page = navigation.add_titled(&about_page, Some("about"), "About");
+    about_stack_page.set_icon_name(Some("help-about-symbolic"));
 
-    let stack = gtk::Stack::new();
-    stack.set_hexpand(true);
-    stack.set_vexpand(true);
+    let widgets = UiWidgets {
+        dashboard,
+        discovery: discovery_widgets,
+        casting: casting_widgets,
+        audio: audio_widgets,
+        receiver: receiver_widgets,
+        diagnostics: diagnostics_widgets,
+        settings: settings_widgets,
+    };
 
-    let (dashboard, dashboard_status_label) = dashboard_page(
-        &state.borrow(),
-        audio_backend.backend_name(),
-        &audio_source_summary,
-    );
-    stack.add_titled(&dashboard, Some("dashboard"), "Dashboard");
-    let (devices_page, devices_label) = discovery_page(&state.borrow(), &discovery_summary);
-    stack.add_titled(&devices_page, Some("devices"), "Devices");
-    let (streaming_page, streaming_status_label, receiver_selector, local_output_selector) =
-        streaming_page(
-            Rc::clone(&state),
-            Arc::clone(&sender),
-            audio_backend.clone(),
-        );
-    stack.add_titled(&streaming_page, Some("streaming"), "Streaming");
-    let (receiver_page, receiver_status_label, receiver_output_selector) = receiver_page(
-        Rc::clone(&state),
-        Arc::clone(&receiver),
-        Arc::clone(&receiver_transport),
-    );
-    stack.add_titled(&receiver_page, Some("receiver"), "Receiver");
-    stack.add_titled(
-        &status_page(
-            "Audio",
-            &format!(
-                "{audio_source_summary}\n{playback_target_summary}\nCapture frames expose sequence, timestamp, PCM payload bytes, peak, and RMS stats for local monitoring and the network encoder."
-            ),
-        ),
-        Some("audio"),
-        "Audio",
-    );
-    stack.add_titled(
-        &status_page(
-            "Diagnostics",
-            state
-                .borrow()
-                .diagnostics
-                .first()
-                .map(|event| event.message.as_str())
-                .unwrap_or("Diagnostics are ready for future runtime events."),
-        ),
-        Some("diagnostics"),
-        "Diagnostics",
-    );
-    stack.add_titled(
-        &status_page(
-            "Settings",
-            "Typed default configuration is loaded in memory.",
-        ),
-        Some("settings"),
-        "Settings",
-    );
-    stack.add_titled(&about_page(), Some("about"), "About");
+    let controller = UiController {
+        state: Rc::clone(&state),
+        audio_backend: audio_backend.clone(),
+        sender: Arc::clone(&sender),
+        receiver: Arc::clone(&receiver),
+        receiver_transport: Arc::clone(&receiver_transport),
+        navigation: navigation.clone(),
+        widgets,
+        context: UiContext {
+            audio_backend_name: audio_backend.backend_name().to_string(),
+            discovery_service_type: discovery.service_type().to_string(),
+            discovery_started,
+        },
+    };
 
-    let sidebar = gtk::StackSidebar::new();
-    sidebar.set_stack(&stack);
-    sidebar.set_width_request(220);
-
-    body.append(&sidebar);
-    body.append(&stack);
-    root.append(&body);
+    refresh_ui(&controller);
+    connect_navigation_buttons(&controller);
+    connect_casting_controls(&controller);
+    connect_audio_controls(&controller);
+    connect_receiver_controls(&controller);
+    connect_settings_controls(&controller);
+    connect_diagnostics_controls(&controller);
 
     tracing::info!(
         audio_backend = audio_backend.backend_name(),
         discovery_service = discovery.service_type(),
         receiver_state = ?receiver.lock().expect("receiver runtime mutex").state(),
         sender_state = ?sender.lock().expect("sender session mutex").snapshot().state,
-        "SynchroSonic scaffold window activated"
+        "SynchroSonic window activated"
     );
 
-    start_discovery_poll(
-        discovery,
-        Rc::clone(&state),
-        devices_label,
-        receiver_selector.clone(),
-    );
-    start_receiver_poll(
-        Arc::clone(&receiver),
-        Arc::clone(&receiver_transport),
-        Rc::clone(&state),
-        receiver_status_label.clone(),
-        dashboard_status_label.clone(),
-        audio_backend.backend_name().to_string(),
-        audio_source_summary.clone(),
-    );
-    start_streaming_poll(
-        Arc::clone(&sender),
-        Rc::clone(&state),
-        streaming_status_label.clone(),
-        dashboard_status_label.clone(),
-        receiver_selector,
-        audio_backend.backend_name().to_string(),
-        audio_source_summary.clone(),
-    );
-    start_playback_target_poll(
-        audio_backend.clone(),
-        Arc::clone(&sender),
-        Arc::clone(&receiver),
-        Rc::clone(&state),
-        local_output_selector,
-        receiver_output_selector,
-        streaming_status_label,
-        receiver_status_label,
-        dashboard_status_label,
-        audio_backend.backend_name().to_string(),
-        audio_source_summary.clone(),
-    );
+    start_discovery_poll(discovery, controller.clone());
+    start_receiver_poll(controller.clone());
+    start_streaming_poll(controller.clone());
+    start_audio_inventory_poll(controller.clone());
 
     window.set_content(Some(&root));
     window.present();
 }
 
-fn dashboard_page(
-    state: &AppState,
-    audio_backend_name: &str,
-    audio_source_summary: &str,
-) -> (gtk::Box, gtk::Label) {
-    let page = gtk::Box::new(Orientation::Vertical, 12);
-    page.set_margin_top(24);
-    page.set_margin_bottom(24);
-    page.set_margin_start(24);
-    page.set_margin_end(24);
-
-    let title = gtk::Label::new(Some("Ready for implementation milestones"));
-    title.add_css_class("title-1");
-    title.set_halign(Align::Start);
-    page.append(&title);
-
-    let summary = gtk::Label::new(Some(
-        "PipeWire source enumeration is active and the sender/receiver pipeline is live. Use the Streaming page to start a cast session and decide whether the captured stream also mirrors to a local playback branch.",
-    ));
-    summary.set_wrap(true);
-    summary.set_halign(Align::Start);
-    page.append(&summary);
-
-    let status = gtk::Label::new(Some(&format_dashboard_status(
-        state,
-        audio_backend_name,
-        audio_source_summary,
-    )));
-    status.set_halign(Align::Start);
-    status.set_selectable(true);
-    page.append(&status);
-
-    let start_button = gtk::Button::with_label("Start Casting");
-    start_button.set_sensitive(false);
-    start_button.set_tooltip_text(Some(
-        "Use the dedicated Streaming page controls for live cast and local mirror management.",
-    ));
-    start_button.set_halign(Align::Start);
-    page.append(&start_button);
-
-    (page, status)
+fn connect_navigation_buttons(controller: &UiController) {
+    connect_navigation_button(
+        &controller.widgets.dashboard.open_devices_button,
+        &controller.navigation,
+        "devices",
+    );
+    connect_navigation_button(
+        &controller.widgets.dashboard.open_casting_button,
+        &controller.navigation,
+        "casting",
+    );
+    connect_navigation_button(
+        &controller.widgets.dashboard.open_audio_button,
+        &controller.navigation,
+        "audio",
+    );
+    connect_navigation_button(
+        &controller.widgets.dashboard.open_receiver_button,
+        &controller.navigation,
+        "receiver",
+    );
 }
 
-fn status_page(title: &str, message: &str) -> gtk::Box {
-    let page = gtk::Box::new(Orientation::Vertical, 12);
-    page.set_margin_top(24);
-    page.set_margin_bottom(24);
-    page.set_margin_start(24);
-    page.set_margin_end(24);
-
-    let heading = gtk::Label::new(Some(title));
-    heading.add_css_class("title-1");
-    heading.set_halign(Align::Start);
-    page.append(&heading);
-
-    let body = gtk::Label::new(Some(message));
-    body.set_wrap(true);
-    body.set_halign(Align::Start);
-    page.append(&body);
-
-    page
+fn connect_navigation_button(
+    button: &gtk::Button,
+    navigation: &adw::ViewStack,
+    page: &'static str,
+) {
+    let navigation = navigation.clone();
+    button.connect_clicked(move |_| {
+        navigation.set_visible_child_name(page);
+    });
 }
 
-fn discovery_page(state: &AppState, status: &str) -> (gtk::Box, gtk::Label) {
-    let page = gtk::Box::new(Orientation::Vertical, 12);
-    page.set_margin_top(24);
-    page.set_margin_bottom(24);
-    page.set_margin_start(24);
-    page.set_margin_end(24);
-
-    let heading = gtk::Label::new(Some("Devices"));
-    heading.add_css_class("title-1");
-    heading.set_halign(Align::Start);
-    page.append(&heading);
-
-    let status_label = gtk::Label::new(Some(status));
-    status_label.set_wrap(true);
-    status_label.set_halign(Align::Start);
-    page.append(&status_label);
-
-    let devices_label = gtk::Label::new(Some(&format_discovery_devices(state)));
-    devices_label.set_wrap(true);
-    devices_label.set_selectable(true);
-    devices_label.set_halign(Align::Start);
-    page.append(&devices_label);
-
-    (page, devices_label)
-}
-
-fn streaming_page(
-    state: Rc<RefCell<AppState>>,
-    sender: Arc<Mutex<LanSenderSession>>,
-    audio_backend: LinuxAudioBackend,
-) -> (gtk::Box, gtk::Label, gtk::ComboBoxText, gtk::ComboBoxText) {
-    let page = gtk::Box::new(Orientation::Vertical, 12);
-    page.set_margin_top(24);
-    page.set_margin_bottom(24);
-    page.set_margin_start(24);
-    page.set_margin_end(24);
-
-    let heading = gtk::Label::new(Some("Streaming"));
-    heading.add_css_class("title-1");
-    heading.set_halign(Align::Start);
-    page.append(&heading);
-
-    let summary = gtk::Label::new(Some(
-        "The sender uses one capture stream with an explicit fan-out: each receiver gets its own bounded network branch, and an optional bounded local branch mirrors playback on the sender. Add or remove the selected receiver without collapsing the rest of the cast.",
-    ));
-    summary.set_wrap(true);
-    summary.set_halign(Align::Start);
-    page.append(&summary);
-
-    let receiver_selector = gtk::ComboBoxText::new();
-    refresh_receiver_selector(&receiver_selector, &state.borrow());
+fn connect_casting_controls(controller: &UiController) {
     {
-        let state = Rc::clone(&state);
+        let controller = controller.clone();
+        let receiver_selector = controller.widgets.casting.receiver_selector.clone();
         receiver_selector.connect_changed(move |selector| {
             if let Some(active_id) = selector.active_id() {
-                let _ = state
+                let _ = controller
+                    .state
                     .borrow_mut()
                     .select_receiver_device(DeviceId::new(active_id.as_str()));
+                refresh_ui(&controller);
             }
         });
     }
-    page.append(&receiver_selector);
-
-    let mirror_row = gtk::Box::new(Orientation::Horizontal, 12);
-    let mirror_label = gtk::Label::new(Some("Mirror locally while casting"));
-    mirror_label.set_halign(Align::Start);
-    let mirror_switch = gtk::Switch::new();
-    mirror_switch.set_active(state.borrow().config.audio.local_playback_enabled);
-    mirror_row.append(&mirror_label);
-    mirror_row.append(&mirror_switch);
-    page.append(&mirror_row);
-
-    let mirror_target_selector = gtk::ComboBoxText::new();
-    refresh_playback_target_selector(
-        &mirror_target_selector,
-        &state.borrow(),
-        state
-            .borrow()
-            .config
-            .audio
-            .local_playback_target_id
-            .as_deref(),
-        "Local mirror output: system default",
-    );
-    page.append(&mirror_target_selector);
-
-    let controls = gtk::Box::new(Orientation::Horizontal, 12);
-    let start_button = gtk::Button::with_label("Add Selected Target");
-    let stop_button = gtk::Button::with_label("Remove Selected Target");
-    let stop_all_button = gtk::Button::with_label("Stop All");
-    controls.append(&start_button);
-    controls.append(&stop_button);
-    controls.append(&stop_all_button);
-    page.append(&controls);
-
-    let status_label = gtk::Label::new(Some(&format_streaming_status(&state.borrow())));
-    status_label.set_wrap(true);
-    status_label.set_selectable(true);
-    status_label.set_halign(Align::Start);
-    page.append(&status_label);
 
     {
-        let state = Rc::clone(&state);
-        let sender = Arc::clone(&sender);
-        let status_label = status_label.clone();
-        mirror_switch.connect_active_notify(move |toggle| {
+        let controller = controller.clone();
+        let local_mirror_switch = controller.widgets.casting.local_mirror_switch.clone();
+        local_mirror_switch.connect_active_notify(move |toggle| {
             let enabled = toggle.is_active();
             let (result, snapshot) = {
-                let sender = sender.lock().expect("sender session mutex");
+                let sender = controller.sender.lock().expect("sender session mutex");
                 (
                     sender.set_local_playback_enabled(enabled),
                     sender.snapshot(),
                 )
             };
 
-            let mut state = state.borrow_mut();
-            state.set_local_playback_enabled(enabled);
-            state.apply_streaming_snapshot(snapshot);
-
-            match result {
-                Ok(()) => {
-                    let scope =
-                        if state.streaming.state == synchrosonic_core::StreamSessionState::Idle {
+            {
+                let mut state = controller.state.borrow_mut();
+                state.set_local_playback_enabled(enabled);
+                state.apply_streaming_snapshot(snapshot);
+                match result {
+                    Ok(()) => {
+                        let scope = if state.streaming.state
+                            == synchrosonic_core::StreamSessionState::Idle
+                        {
                             "next cast session"
                         } else {
                             "active cast session"
                         };
-                    state.diagnostics.push(DiagnosticEvent::info(
-                        "streaming",
-                        format!(
-                            "Local playback mirror {} for the {scope}.",
-                            if enabled { "enabled" } else { "disabled" }
-                        ),
-                    ));
-                }
-                Err(error) => {
-                    state.diagnostics.push(DiagnosticEvent::error(
+                        state.diagnostics.push(DiagnosticEvent::info(
+                            "streaming",
+                            format!(
+                                "Local playback mirror {} for the {scope}.",
+                                if enabled { "enabled" } else { "disabled" }
+                            ),
+                        ));
+                    }
+                    Err(error) => state.diagnostics.push(DiagnosticEvent::error(
                         "streaming",
                         format!("Failed to update local playback mirror: {error}"),
-                    ));
+                    )),
                 }
             }
 
-            status_label.set_text(&format_streaming_status(&state));
+            refresh_ui(&controller);
         });
     }
 
     {
-        let state = Rc::clone(&state);
-        let sender = Arc::clone(&sender);
-        let status_label = status_label.clone();
-        mirror_target_selector.connect_changed(move |selector| {
+        let controller = controller.clone();
+        let local_output_selector = controller.widgets.casting.local_output_selector.clone();
+        local_output_selector.connect_changed(move |selector| {
             let target_id = selector
                 .active_id()
                 .and_then(|id| playback_target_id_from_selection(id.as_str()));
-            if state.borrow().config.audio.local_playback_target_id == target_id {
+            if controller
+                .state
+                .borrow()
+                .config
+                .audio
+                .local_playback_target_id
+                == target_id
+            {
                 return;
             }
 
-            let result = {
-                let mut sender = sender.lock().expect("sender session mutex");
-                sender.set_local_playback_target(target_id.clone())
+            let (result, snapshot) = {
+                let mut sender = controller.sender.lock().expect("sender session mutex");
+                let result = sender.set_local_playback_target(target_id.clone());
+                let snapshot = sender.snapshot();
+                (result, snapshot)
             };
 
-            let snapshot = sender.lock().expect("sender session mutex").snapshot();
-            let mut state = state.borrow_mut();
-            state.select_local_playback_target(target_id.clone());
-            state.apply_streaming_snapshot(snapshot);
-
-            match result {
-                Ok(()) => {
-                    let selected_target = format_selected_playback_target(
-                        &state,
-                        state.config.audio.local_playback_target_id.as_deref(),
-                    );
-                    state.diagnostics.push(DiagnosticEvent::info(
-                        "streaming",
-                        format!("Local mirror output target set to {selected_target}."),
-                    ));
-                }
-                Err(error) => {
-                    state.diagnostics.push(DiagnosticEvent::warning(
+            {
+                let mut state = controller.state.borrow_mut();
+                state.select_local_playback_target(target_id);
+                state.apply_streaming_snapshot(snapshot);
+                match result {
+                    Ok(()) => {
+                        let selected_target = format_selected_playback_target(
+                            &state,
+                            state.config.audio.local_playback_target_id.as_deref(),
+                        );
+                        state.diagnostics.push(DiagnosticEvent::info(
+                            "streaming",
+                            format!("Local mirror output target set to {selected_target}."),
+                        ));
+                    }
+                    Err(error) => state.diagnostics.push(DiagnosticEvent::warning(
                         "streaming",
                         format!("Failed to update local mirror output target: {error}"),
-                    ));
+                    )),
                 }
             }
 
-            status_label.set_text(&format_streaming_status(&state));
+            refresh_ui(&controller);
         });
     }
 
     {
-        let state = Rc::clone(&state);
-        let sender = Arc::clone(&sender);
-        let status_label = status_label.clone();
-        let receiver_selector = receiver_selector.clone();
-        let audio_backend = audio_backend.clone();
-        start_button.connect_clicked(move |_| {
-            let target = {
-                let active_id = receiver_selector.active_id();
-                let state = state.borrow();
-                active_id
-                    .as_ref()
-                    .and_then(|id| find_receiver_device(&state, id.as_str()))
+        let controller = controller.clone();
+        let add_button = controller.widgets.casting.add_button.clone();
+        add_button.connect_clicked(move |_| queue_selected_receiver_for_cast(&controller));
+    }
+
+    {
+        let controller = controller.clone();
+        let stop_all_button = controller.widgets.casting.stop_all_button.clone();
+        stop_all_button.connect_clicked(move |_| stop_all_casting(&controller));
+    }
+}
+
+fn connect_audio_controls(controller: &UiController) {
+    let controller = controller.clone();
+    let source_selector = controller.widgets.audio.source_selector.clone();
+    source_selector.connect_changed(move |selector| {
+        let Some(active_id) = selector.active_id() else {
+            return;
+        };
+
+        if controller
+            .state
+            .borrow()
+            .selected_audio_source_id
+            .as_deref()
+            == Some(active_id.as_str())
+        {
+            return;
+        }
+
+        let changed = controller
+            .state
+            .borrow_mut()
+            .select_audio_source(active_id.as_str());
+
+        if !changed {
+            return;
+        }
+
+        {
+            let mut state = controller.state.borrow_mut();
+            let selected_source = format_selected_audio_source(&state);
+            let scope = if state.streaming.state == synchrosonic_core::StreamSessionState::Idle {
+                "next cast session"
+            } else {
+                "a future cast after the current session stops"
+            };
+            state.diagnostics.push(DiagnosticEvent::info(
+                "audio",
+                format!("Capture source set to {selected_source} for {scope}."),
+            ));
+        }
+
+        refresh_ui(&controller);
+    });
+}
+
+fn connect_receiver_controls(controller: &UiController) {
+    {
+        let controller = controller.clone();
+        let output_selector = controller.widgets.receiver.output_selector.clone();
+        output_selector.connect_changed(move |selector| {
+            let target_id = selector
+                .active_id()
+                .and_then(|id| playback_target_id_from_selection(id.as_str()));
+            if controller.state.borrow().config.receiver.playback_target_id == target_id {
+                return;
+            }
+
+            let (result, snapshot) = {
+                let mut receiver = controller.receiver.lock().expect("receiver runtime mutex");
+                let result = receiver.set_playback_target(target_id.clone());
+                let snapshot = receiver.snapshot();
+                (result, snapshot)
             };
 
-            let Some(device) = target else {
-                let mut state = state.borrow_mut();
-                state.diagnostics.push(DiagnosticEvent::warning(
-                    "streaming",
-                    "No receiver with a resolved transport endpoint is currently selected.",
-                ));
-                status_label.set_text(&format_streaming_status(&state));
+            {
+                let mut state = controller.state.borrow_mut();
+                state.select_receiver_playback_target(target_id);
+                state.apply_receiver_snapshot(snapshot);
+                match result {
+                    Ok(()) => {
+                        let scope = if matches!(
+                            state.receiver.state,
+                            synchrosonic_core::ReceiverServiceState::Connected
+                                | synchrosonic_core::ReceiverServiceState::Buffering
+                                | synchrosonic_core::ReceiverServiceState::Playing
+                        ) {
+                            "active receiver playback"
+                        } else {
+                            "next receiver playback session"
+                        };
+                        let selected_target = format_selected_playback_target(
+                            &state,
+                            state.config.receiver.playback_target_id.as_deref(),
+                        );
+                        state.diagnostics.push(DiagnosticEvent::info(
+                            "receiver",
+                            format!(
+                                "Receiver output target set to {selected_target} for the {scope}."
+                            ),
+                        ));
+                    }
+                    Err(error) => state.diagnostics.push(DiagnosticEvent::warning(
+                        "receiver",
+                        format!("Failed to update receiver playback target: {error}"),
+                    )),
+                }
+            }
+
+            refresh_ui(&controller);
+        });
+    }
+
+    {
+        let controller = controller.clone();
+        let latency_selector = controller.widgets.receiver.latency_selector.clone();
+        latency_selector.connect_changed(move |selector| {
+            let Some(active_id) = selector.active_id() else {
                 return;
             };
-
-            let Some(endpoint) = device.endpoint.clone() else {
-                let mut state = state.borrow_mut();
-                state.diagnostics.push(DiagnosticEvent::warning(
-                    "streaming",
-                    "Selected receiver does not expose a transport endpoint yet.",
-                ));
-                status_label.set_text(&format_streaming_status(&state));
+            let Some(preset) = latency_preset_from_id(active_id.as_str()) else {
                 return;
             };
+            if controller.state.borrow().config.receiver.latency_preset == preset {
+                return;
+            }
 
-            let target =
-                SenderTarget::new(device.id.clone(), device.display_name.clone(), endpoint);
-            let capture_settings = state.borrow().config.audio.capture_settings();
-            let sender_name = state.borrow().receiver.advertised_name.clone();
+            let result = controller
+                .receiver
+                .lock()
+                .expect("receiver runtime mutex")
+                .set_latency_preset(preset);
+            let snapshot = controller
+                .receiver
+                .lock()
+                .expect("receiver runtime mutex")
+                .snapshot();
 
-            match sender.lock().expect("sender session mutex").start(
-                audio_backend.clone(),
-                capture_settings,
-                target,
-                sender_name,
-            ) {
-                Ok(()) => {
-                    let snapshot = sender.lock().expect("sender session mutex").snapshot();
-                    let mut state = state.borrow_mut();
-                    state.apply_streaming_snapshot(snapshot.clone());
-                    state.diagnostics.push(DiagnosticEvent::info(
-                        "streaming",
+            {
+                let mut state = controller.state.borrow_mut();
+                state.set_receiver_latency_preset(preset);
+                state.apply_receiver_snapshot(snapshot);
+                match result {
+                    Ok(()) => state.diagnostics.push(DiagnosticEvent::info(
+                        "receiver",
                         format!(
-                            "Queued receiver target {} at {} with local mirror {}.",
-                            snapshot
-                                .target(&device.id)
-                                .map(|target| target.receiver_name.as_str())
-                                .unwrap_or(device.display_name.as_str()),
-                            device
-                                .endpoint
-                                .as_ref()
-                                .map(|endpoint| endpoint.address.to_string())
-                                .unwrap_or_else(|| "unknown endpoint".to_string()),
-                            if snapshot.local_mirror.desired_enabled {
-                                "enabled"
-                            } else {
-                                "disabled"
-                            }
+                            "Receiver latency preset set to {}.",
+                            format_latency_preset(preset)
                         ),
-                    ));
-                    status_label.set_text(&format_streaming_status(&state));
-                }
-                Err(error) => {
-                    let mut state = state.borrow_mut();
-                    state.diagnostics.push(DiagnosticEvent::error(
-                        "streaming",
-                        format!("Failed to start stream: {error}"),
-                    ));
-                    status_label.set_text(&format_streaming_status(&state));
+                    )),
+                    Err(error) => state.diagnostics.push(DiagnosticEvent::warning(
+                        "receiver",
+                        format!("Failed to change receiver latency preset: {error}"),
+                    )),
                 }
             }
+
+            refresh_ui(&controller);
         });
     }
 
     {
-        let state = Rc::clone(&state);
-        let sender = Arc::clone(&sender);
-        let status_label = status_label.clone();
-        stop_button.connect_clicked(move |_| {
-            let selected_device_id = state.borrow().selected_receiver_device_id.clone();
-            let Some(device_id) = selected_device_id else {
-                let mut state = state.borrow_mut();
-                state.diagnostics.push(DiagnosticEvent::warning(
-                    "streaming",
-                    "Select a receiver target before trying to remove it from the cast.",
-                ));
-                status_label.set_text(&format_streaming_status(&state));
+        let controller = controller.clone();
+        let start_button = controller.widgets.receiver.start_button.clone();
+        start_button.connect_clicked(move |_| start_receiver_mode(&controller));
+    }
+
+    {
+        let controller = controller.clone();
+        let stop_button = controller.widgets.receiver.stop_button.clone();
+        stop_button.connect_clicked(move |_| stop_receiver_mode(&controller));
+    }
+}
+
+fn connect_settings_controls(controller: &UiController) {
+    {
+        let controller = controller.clone();
+        let quality_selector = controller.widgets.settings.quality_selector.clone();
+        quality_selector.connect_changed(move |selector| {
+            let Some(active_id) = selector.active_id() else {
                 return;
             };
+            let Some(preset) = quality_preset_from_id(active_id.as_str()) else {
+                return;
+            };
+            if controller.state.borrow().config.transport.quality == preset {
+                return;
+            }
 
-            match sender
+            let result = controller
+                .sender
                 .lock()
                 .expect("sender session mutex")
-                .stop_target(&device_id)
+                .set_quality_preset(preset);
             {
-                Ok(()) => {
-                    let snapshot = sender.lock().expect("sender session mutex").snapshot();
-                    let mut state = state.borrow_mut();
-                    state.apply_streaming_snapshot(snapshot);
-                    state.diagnostics.push(DiagnosticEvent::info(
-                        "streaming",
-                        format!(
-                            "Removed receiver target {} from the active cast.",
-                            device_id
-                        ),
-                    ));
-                    status_label.set_text(&format_streaming_status(&state));
-                }
-                Err(error) => {
-                    let mut state = state.borrow_mut();
-                    state.diagnostics.push(DiagnosticEvent::error(
-                        "streaming",
-                        format!("Failed to stop stream: {error}"),
-                    ));
-                    status_label.set_text(&format_streaming_status(&state));
+                let mut state = controller.state.borrow_mut();
+                state.set_transport_quality(preset);
+                match result {
+                    Ok(()) => {
+                        let scope = if state.streaming.state
+                            == synchrosonic_core::StreamSessionState::Idle
+                        {
+                            "next cast session"
+                        } else {
+                            "newly added targets and future cast sessions"
+                        };
+                        state.diagnostics.push(DiagnosticEvent::info(
+                            "settings",
+                            format!(
+                                "Sender quality preset set to {} for {scope}.",
+                                format_quality_preset(preset)
+                            ),
+                        ));
+                    }
+                    Err(error) => state.diagnostics.push(DiagnosticEvent::warning(
+                        "settings",
+                        format!("Failed to change sender quality preset: {error}"),
+                    )),
                 }
             }
+
+            refresh_ui(&controller);
         });
     }
 
     {
-        let state = Rc::clone(&state);
-        let sender = Arc::clone(&sender);
-        let status_label = status_label.clone();
-        stop_all_button.connect_clicked(move |_| {
-            match sender.lock().expect("sender session mutex").stop() {
-                Ok(()) => {
-                    let snapshot = sender.lock().expect("sender session mutex").snapshot();
-                    let mut state = state.borrow_mut();
-                    state.apply_streaming_snapshot(snapshot);
-                    state.diagnostics.push(DiagnosticEvent::info(
-                        "streaming",
-                        "Stopped the sender session manager and released all target transports.",
-                    ));
-                    status_label.set_text(&format_streaming_status(&state));
-                }
-                Err(error) => {
-                    let mut state = state.borrow_mut();
-                    state.diagnostics.push(DiagnosticEvent::error(
-                        "streaming",
-                        format!("Failed to stop all sender targets: {error}"),
-                    ));
-                    status_label.set_text(&format_streaming_status(&state));
-                }
+        let controller = controller.clone();
+        let theme_switch = controller.widgets.settings.theme_switch.clone();
+        theme_switch.connect_active_notify(move |toggle| {
+            let prefer_dark_theme = toggle.is_active();
+            apply_color_scheme(prefer_dark_theme);
+            {
+                let mut state = controller.state.borrow_mut();
+                state.set_prefer_dark_theme(prefer_dark_theme);
+                state.diagnostics.push(DiagnosticEvent::info(
+                    "settings",
+                    format!(
+                        "Theme preference set to {}.",
+                        if prefer_dark_theme {
+                            "prefer dark"
+                        } else {
+                            "follow system default"
+                        }
+                    ),
+                ));
             }
+            refresh_ui(&controller);
         });
     }
+
+    {
+        let controller = controller.clone();
+        let verbose_logging_switch = controller.widgets.settings.verbose_logging_switch.clone();
+        verbose_logging_switch.connect_active_notify(move |toggle| {
+            let verbose_logging = toggle.is_active();
+            {
+                let mut state = controller.state.borrow_mut();
+                state.set_verbose_logging(verbose_logging);
+                state.diagnostics.push(DiagnosticEvent::info(
+                    "settings",
+                    format!(
+                        "Verbose logging is now {} for this run.",
+                        if verbose_logging {
+                            "enabled"
+                        } else {
+                            "disabled"
+                        }
+                    ),
+                ));
+            }
+            refresh_ui(&controller);
+        });
+    }
+}
+
+fn connect_diagnostics_controls(controller: &UiController) {
+    let controller = controller.clone();
+    let clear_button = controller.widgets.diagnostics.clear_button.clone();
+    clear_button.connect_clicked(move |_| {
+        controller.state.borrow_mut().clear_diagnostics();
+        refresh_ui(&controller);
+    });
+}
+
+fn refresh_ui(controller: &UiController) {
+    let state = controller.state.borrow();
+    refresh_dashboard(controller, &state);
+    refresh_discovery_page(controller, &state);
+    refresh_casting_page(controller, &state);
+    refresh_audio_page(controller, &state);
+    refresh_receiver_page(controller, &state);
+    refresh_diagnostics_page(controller, &state);
+    refresh_settings_page(controller, &state);
+}
+
+fn refresh_dashboard(controller: &UiController, state: &AppState) {
+    let receiver_capable = state
+        .discovered_devices
+        .iter()
+        .filter(|device| device.capabilities.supports_receiver)
+        .count();
+    let bluetooth_outputs = state
+        .playback_targets
+        .iter()
+        .filter(|target| target.is_bluetooth())
+        .count();
+
+    controller
+        .widgets
+        .dashboard
+        .session_row
+        .set_subtitle(&format!(
+            "Cast session {:?}, {} active target(s), local mirror {:?}.",
+            state.cast_session,
+            state.streaming.active_target_count(),
+            state.streaming.local_mirror.state
+        ));
+    controller
+        .widgets
+        .dashboard
+        .discovery_row
+        .set_subtitle(&format!(
+            "{} device(s) discovered, {} receiver-capable, discovery {} on {}.",
+            state.discovered_devices.len(),
+            receiver_capable,
+            if controller.context.discovery_started {
+                "running"
+            } else {
+                "failed"
+            },
+            controller.context.discovery_service_type
+        ));
+    controller
+        .widgets
+        .dashboard
+        .casting_row
+        .set_subtitle(&format!(
+            "Selected receiver: {}. Healthy targets: {} of {}.",
+            selected_receiver_label(state),
+            state.streaming.healthy_target_count(),
+            state.streaming.active_target_count()
+        ));
+    controller
+        .widgets
+        .dashboard
+        .audio_row
+        .set_subtitle(&format!(
+            "Capture source: {}. Playback outputs: {} total, {} Bluetooth.",
+            format_selected_audio_source(state),
+            state.playback_targets.len(),
+            bluetooth_outputs
+        ));
+    controller
+        .widgets
+        .dashboard
+        .detail_label
+        .set_text(&format_dashboard_status(
+            state,
+            &controller.context.audio_backend_name,
+        ));
+}
+
+fn refresh_discovery_page(controller: &UiController, state: &AppState) {
+    let summary = if controller.context.discovery_started {
+        format!(
+            "Listening for {} advertisements. Receiver-capable devices can be queued directly from this page.",
+            controller.context.discovery_service_type
+        )
+    } else {
+        "Discovery startup failed earlier. Existing cached devices can still be shown, and the diagnostics page has the startup error.".to_string()
+    };
+    controller
+        .widgets
+        .discovery
+        .summary_row
+        .set_subtitle(&summary);
+
+    clear_list_box(&controller.widgets.discovery.device_list);
+    let has_devices = !state.discovered_devices.is_empty();
+    controller
+        .widgets
+        .discovery
+        .empty_state
+        .set_visible(!has_devices);
+    controller
+        .widgets
+        .discovery
+        .device_list
+        .set_visible(has_devices);
+    if !has_devices {
+        return;
+    }
+
+    for device in &state.discovered_devices {
+        let row = adw::ActionRow::new();
+        row.set_title(&device.display_name);
+        row.set_subtitle(&format_device_row_subtitle(state, device));
+
+        let status_icon = gtk::Image::from_icon_name(status_icon_name(device.status));
+        row.add_prefix(&status_icon);
+
+        if device.capabilities.supports_receiver && device.endpoint.is_some() {
+            let button = gtk::Button::with_label(if state.streaming.target(&device.id).is_some() {
+                "Queued"
+            } else {
+                "Add to Cast"
+            });
+            let can_queue = state.streaming.target(&device.id).is_none();
+            button.set_sensitive(can_queue);
+            if can_queue {
+                button.add_css_class("suggested-action");
+                let controller = controller.clone();
+                let device = device.clone();
+                button.connect_clicked(move |_| {
+                    queue_receiver_device_for_cast(&controller, device.clone())
+                });
+            }
+            row.add_suffix(&button);
+        }
+
+        controller.widgets.discovery.device_list.append(&row);
+    }
+}
+
+fn refresh_casting_page(controller: &UiController, state: &AppState) {
+    refresh_receiver_selector(&controller.widgets.casting.receiver_selector, state);
+    refresh_playback_target_selector(
+        &controller.widgets.casting.local_output_selector,
+        state,
+        state.config.audio.local_playback_target_id.as_deref(),
+        "Local mirror output: system default",
+    );
+
+    controller
+        .widgets
+        .casting
+        .local_mirror_switch
+        .set_active(state.config.audio.local_playback_enabled);
+    controller
+        .widgets
+        .casting
+        .session_row
+        .set_subtitle(&format!(
+            "{:?} with {} active target(s). Selected receiver: {}.",
+            state.streaming.state,
+            state.streaming.active_target_count(),
+            selected_receiver_label(state)
+        ));
+    controller.widgets.casting.mirror_row.set_subtitle(&format!(
+        "Local mirror {} on {} (available={}).",
+        if state.streaming.local_mirror.desired_enabled {
+            format!("desired as {:?}", state.streaming.local_mirror.state)
+        } else {
+            "disabled".to_string()
+        },
+        format_selected_playback_target(
+            state,
+            state.config.audio.local_playback_target_id.as_deref()
+        ),
+        state.local_playback_target_available()
+    ));
+    controller
+        .widgets
+        .casting
+        .add_button
+        .set_sensitive(!state.discovered_devices.is_empty());
+    controller
+        .widgets
+        .casting
+        .stop_all_button
+        .set_sensitive(state.streaming.active_target_count() > 0);
+
+    clear_list_box(&controller.widgets.casting.target_list);
+    let has_targets = !state.streaming.targets.is_empty();
+    controller
+        .widgets
+        .casting
+        .empty_state
+        .set_visible(!has_targets);
+    controller
+        .widgets
+        .casting
+        .target_list
+        .set_visible(has_targets);
+    for target in &state.streaming.targets {
+        let row = adw::ActionRow::new();
+        row.set_title(&target.receiver_name);
+        row.set_subtitle(&format_target_row_subtitle(target));
+
+        let remove_button = gtk::Button::with_label("Remove");
+        let controller_for_button = controller.clone();
+        let device_id = target.receiver_id.clone();
+        remove_button
+            .connect_clicked(move |_| remove_target_from_cast(&controller_for_button, &device_id));
+        row.add_suffix(&remove_button);
+
+        controller.widgets.casting.target_list.append(&row);
+    }
+
+    controller
+        .widgets
+        .casting
+        .detail_label
+        .set_text(&format_streaming_status(state));
+}
+
+fn refresh_audio_page(controller: &UiController, state: &AppState) {
+    refresh_audio_source_selector(&controller.widgets.audio.source_selector, state);
+    controller
+        .widgets
+        .audio
+        .source_selector
+        .set_sensitive(state.streaming.state == synchrosonic_core::StreamSessionState::Idle);
+    controller
+        .widgets
+        .audio
+        .current_source_row
+        .set_subtitle(&format!(
+            "{}. Changes require a fresh cast session once streaming has already started.",
+            format_selected_audio_source(state)
+        ));
+    controller.widgets.audio.output_row.set_subtitle(&format!(
+        "Sender mirror uses {}. Receiver mode uses {}.",
+        format_selected_playback_target(
+            state,
+            state.config.audio.local_playback_target_id.as_deref()
+        ),
+        format_selected_playback_target(state, state.config.receiver.playback_target_id.as_deref())
+    ));
+
+    clear_list_box(&controller.widgets.audio.source_list);
+    let has_sources = !state.audio_sources.is_empty();
+    controller
+        .widgets
+        .audio
+        .sources_empty_state
+        .set_visible(!has_sources);
+    controller
+        .widgets
+        .audio
+        .source_list
+        .set_visible(has_sources);
+    for source in &state.audio_sources {
+        let row = adw::ActionRow::new();
+        row.set_title(&source.display_name);
+        row.set_subtitle(&format_audio_source_row_subtitle(state, source));
+        let icon = gtk::Image::from_icon_name(audio_source_icon_name(source.kind));
+        row.add_prefix(&icon);
+        controller.widgets.audio.source_list.append(&row);
+    }
+
+    clear_list_box(&controller.widgets.audio.output_list);
+    let has_outputs = !state.playback_targets.is_empty();
+    controller
+        .widgets
+        .audio
+        .outputs_empty_state
+        .set_visible(!has_outputs);
+    controller
+        .widgets
+        .audio
+        .output_list
+        .set_visible(has_outputs);
+    for target in &state.playback_targets {
+        let row = adw::ActionRow::new();
+        row.set_title(&target.display_name);
+        row.set_subtitle(&format_playback_target_inventory_subtitle(state, target));
+        let icon = gtk::Image::from_icon_name(playback_target_icon_name(target));
+        row.add_prefix(&icon);
+        controller.widgets.audio.output_list.append(&row);
+    }
+}
+
+fn refresh_receiver_page(controller: &UiController, state: &AppState) {
+    refresh_playback_target_selector(
+        &controller.widgets.receiver.output_selector,
+        state,
+        state.config.receiver.playback_target_id.as_deref(),
+        "Receiver output: system default",
+    );
+    refresh_latency_selector(
+        &controller.widgets.receiver.latency_selector,
+        state.config.receiver.latency_preset,
+    );
+
+    let receiver_active = state.receiver.state != synchrosonic_core::ReceiverServiceState::Idle;
+    controller
+        .widgets
+        .receiver
+        .latency_selector
+        .set_sensitive(!receiver_active);
+    controller
+        .widgets
+        .receiver
+        .start_button
+        .set_sensitive(!receiver_active);
+    controller
+        .widgets
+        .receiver
+        .stop_button
+        .set_sensitive(receiver_active);
+
+    controller.widgets.receiver.state_row.set_subtitle(&format!(
+        "{:?} on {}:{} with {} latency.",
+        state.receiver.state,
+        state.receiver.bind_host,
+        state.receiver.listen_port,
+        format_latency_preset(state.receiver.latency_preset)
+    ));
+    controller.widgets.receiver.connection_row.set_subtitle(
+        &state
+            .receiver
+            .connection
+            .as_ref()
+            .map(|connection| {
+                format!(
+                    "Session {} from {} at {} Hz / {} ch, requested {} ms.",
+                    connection.session_id,
+                    connection
+                        .remote_addr
+                        .map(|address| address.to_string())
+                        .unwrap_or_else(|| "unresolved peer".to_string()),
+                    connection.stream.sample_rate_hz,
+                    connection.stream.channels,
+                    connection.requested_latency_ms
+                )
+            })
+            .unwrap_or_else(|| "No active sender connection yet.".to_string()),
+    );
+    controller.widgets.receiver.sync_row.set_subtitle(&format!(
+        "{:?}, queued {} ms, target {} ms, late drops {}, sync resets {}.",
+        state.receiver.sync.state,
+        state.receiver.sync.queued_audio_ms,
+        state.receiver.sync.expected_output_latency_ms,
+        state.receiver.sync.late_packet_drops,
+        state.receiver.sync.sync_resets
+    ));
+    controller
+        .widgets
+        .receiver
+        .detail_label
+        .set_text(&format_receiver_status(state));
+}
+
+fn refresh_diagnostics_page(controller: &UiController, state: &AppState) {
+    let info_count = state
+        .diagnostics
+        .iter()
+        .filter(|event| event.level == DiagnosticLevel::Info)
+        .count();
+    let warning_count = state
+        .diagnostics
+        .iter()
+        .filter(|event| event.level == DiagnosticLevel::Warning)
+        .count();
+    let error_count = state
+        .diagnostics
+        .iter()
+        .filter(|event| event.level == DiagnosticLevel::Error)
+        .count();
+    controller
+        .widgets
+        .diagnostics
+        .summary_row
+        .set_subtitle(&format!(
+            "{} info, {} warning, {} error event(s). Newest events appear first.",
+            info_count, warning_count, error_count
+        ));
+
+    clear_list_box(&controller.widgets.diagnostics.list_box);
+    let has_events = !state.diagnostics.is_empty();
+    controller
+        .widgets
+        .diagnostics
+        .empty_state
+        .set_visible(!has_events);
+    controller
+        .widgets
+        .diagnostics
+        .list_box
+        .set_visible(has_events);
+    if !has_events {
+        return;
+    }
+
+    for event in state.diagnostics.iter().rev().take(60) {
+        let row = adw::ActionRow::new();
+        row.set_title(&event.component);
+        row.set_subtitle(&event.message);
+
+        let icon = gtk::Image::from_icon_name(diagnostic_icon_name(event.level));
+        row.add_prefix(&icon);
+
+        let level_label = gtk::Label::new(Some(diagnostic_level_label(event.level)));
+        level_label.add_css_class("dim-label");
+        row.add_suffix(&level_label);
+
+        controller.widgets.diagnostics.list_box.append(&row);
+    }
+}
+
+fn refresh_settings_page(controller: &UiController, state: &AppState) {
+    refresh_quality_selector(
+        &controller.widgets.settings.quality_selector,
+        state.config.transport.quality,
+    );
+    controller
+        .widgets
+        .settings
+        .theme_switch
+        .set_active(state.config.ui.prefer_dark_theme);
+    controller
+        .widgets
+        .settings
+        .verbose_logging_switch
+        .set_active(state.config.diagnostics.verbose_logging);
+
+    controller
+        .widgets
+        .settings
+        .summary_row
+        .set_subtitle(&format!(
+            "Quality preset: {}. Theme: {}. Verbose logging: {}.",
+            format_quality_preset(state.config.transport.quality),
+            if state.config.ui.prefer_dark_theme {
+                "prefer dark"
+            } else {
+                "follow system"
+            },
+            if state.config.diagnostics.verbose_logging {
+                "enabled"
+            } else {
+                "disabled"
+            }
+        ));
+    controller.widgets.settings.note_row.set_subtitle(
+        "Settings are live for the current run. Persistent settings and retained log storage are planned for the next phase.",
+    );
+}
+
+fn queue_selected_receiver_for_cast(controller: &UiController) {
+    let Some(active_id) = controller.widgets.casting.receiver_selector.active_id() else {
+        let mut state = controller.state.borrow_mut();
+        state.diagnostics.push(DiagnosticEvent::warning(
+            "streaming",
+            "Select a receiver before adding it to the cast.",
+        ));
+        drop(state);
+        refresh_ui(controller);
+        return;
+    };
+
+    let device = {
+        let state = controller.state.borrow();
+        find_receiver_device(&state, active_id.as_str())
+    };
+    match device {
+        Some(device) => queue_receiver_device_for_cast(controller, device),
+        None => {
+            let mut state = controller.state.borrow_mut();
+            state.diagnostics.push(DiagnosticEvent::warning(
+                "streaming",
+                "The selected receiver is no longer available with a resolved transport endpoint.",
+            ));
+            drop(state);
+            refresh_ui(controller);
+        }
+    }
+}
+
+fn queue_receiver_device_for_cast(controller: &UiController, device: DiscoveredDevice) {
+    let Some(endpoint) = device.endpoint.clone() else {
+        let mut state = controller.state.borrow_mut();
+        state.diagnostics.push(DiagnosticEvent::warning(
+            "streaming",
+            "Selected receiver does not expose a transport endpoint yet.",
+        ));
+        drop(state);
+        refresh_ui(controller);
+        return;
+    };
+
+    let target = SenderTarget::new(device.id.clone(), device.display_name.clone(), endpoint);
+    let (capture_settings, sender_name) = {
+        let state = controller.state.borrow();
+        (
+            state.config.audio.capture_settings(),
+            state.receiver.advertised_name.clone(),
+        )
+    };
+
+    let result = controller
+        .sender
+        .lock()
+        .expect("sender session mutex")
+        .start(
+            controller.audio_backend.clone(),
+            capture_settings,
+            target,
+            sender_name,
+        );
+    let snapshot = controller
+        .sender
+        .lock()
+        .expect("sender session mutex")
+        .snapshot();
+
+    {
+        let mut state = controller.state.borrow_mut();
+        let _ = state.select_receiver_device(device.id.clone());
+        state.apply_streaming_snapshot(snapshot.clone());
+        match result {
+            Ok(()) => state.diagnostics.push(DiagnosticEvent::info(
+                "streaming",
+                format!(
+                    "Queued receiver target {} at {}. Active targets: {}.",
+                    device.display_name,
+                    device
+                        .endpoint
+                        .as_ref()
+                        .map(|endpoint| endpoint.address.to_string())
+                        .unwrap_or_else(|| "unresolved endpoint".to_string()),
+                    snapshot.active_target_count()
+                ),
+            )),
+            Err(error) => state.diagnostics.push(DiagnosticEvent::error(
+                "streaming",
+                format!("Failed to start or extend the cast session: {error}"),
+            )),
+        }
+    }
+
+    refresh_ui(controller);
+}
+
+fn remove_target_from_cast(controller: &UiController, device_id: &DeviceId) {
+    let result = controller
+        .sender
+        .lock()
+        .expect("sender session mutex")
+        .stop_target(device_id);
+    let snapshot = controller
+        .sender
+        .lock()
+        .expect("sender session mutex")
+        .snapshot();
+
+    {
+        let mut state = controller.state.borrow_mut();
+        state.apply_streaming_snapshot(snapshot);
+        match result {
+            Ok(()) => state.diagnostics.push(DiagnosticEvent::info(
+                "streaming",
+                format!(
+                    "Removed receiver target {} from the active cast.",
+                    device_id
+                ),
+            )),
+            Err(error) => state.diagnostics.push(DiagnosticEvent::error(
+                "streaming",
+                format!("Failed to remove receiver target {device_id}: {error}"),
+            )),
+        }
+    }
+
+    refresh_ui(controller);
+}
+
+fn stop_all_casting(controller: &UiController) {
+    let result = controller
+        .sender
+        .lock()
+        .expect("sender session mutex")
+        .stop();
+    let snapshot = controller
+        .sender
+        .lock()
+        .expect("sender session mutex")
+        .snapshot();
+
+    {
+        let mut state = controller.state.borrow_mut();
+        state.apply_streaming_snapshot(snapshot);
+        match result {
+            Ok(()) => state.diagnostics.push(DiagnosticEvent::info(
+                "streaming",
+                "Stopped the sender session manager and released all cast targets.",
+            )),
+            Err(error) => state.diagnostics.push(DiagnosticEvent::error(
+                "streaming",
+                format!("Failed to stop the sender session manager: {error}"),
+            )),
+        }
+    }
+
+    refresh_ui(controller);
+}
+
+fn start_receiver_mode(controller: &UiController) {
+    let runtime_result = controller
+        .receiver
+        .lock()
+        .expect("receiver runtime mutex")
+        .start();
+
+    match runtime_result {
+        Ok(()) => {
+            let receiver_for_events = Arc::clone(&controller.receiver);
+            let start_transport = controller
+                .receiver_transport
+                .lock()
+                .expect("receiver transport mutex")
+                .start(move |event| {
+                    receiver_for_events
+                        .lock()
+                        .map_err(|_| synchrosonic_core::ReceiverError::ThreadJoin)?
+                        .submit_transport_event(event)
+                });
+
+            if let Err(error) = start_transport {
+                let _ = controller
+                    .receiver
+                    .lock()
+                    .expect("receiver runtime mutex")
+                    .stop();
+                let mut state = controller.state.borrow_mut();
+                state.diagnostics.push(DiagnosticEvent::error(
+                    "receiver",
+                    format!("Receiver transport listener failed to start: {error}"),
+                ));
+                drop(state);
+                refresh_ui(controller);
+                return;
+            }
+
+            let snapshot = controller
+                .receiver
+                .lock()
+                .expect("receiver runtime mutex")
+                .snapshot();
+            {
+                let mut state = controller.state.borrow_mut();
+                state.apply_receiver_snapshot(snapshot.clone());
+                state.diagnostics.push(DiagnosticEvent::info(
+                    "receiver",
+                    format!(
+                        "Receiver mode listening on {}:{} with {} latency preset.",
+                        snapshot.bind_host,
+                        snapshot.listen_port,
+                        format_latency_preset(snapshot.latency_preset)
+                    ),
+                ));
+            }
+        }
+        Err(error) => {
+            let mut state = controller.state.borrow_mut();
+            state.diagnostics.push(DiagnosticEvent::error(
+                "receiver",
+                format!("Failed to start receiver mode: {error}"),
+            ));
+        }
+    }
+
+    refresh_ui(controller);
+}
+
+fn stop_receiver_mode(controller: &UiController) {
+    let stop_transport = controller
+        .receiver_transport
+        .lock()
+        .expect("receiver transport mutex")
+        .stop();
+    let result = controller
+        .receiver
+        .lock()
+        .expect("receiver runtime mutex")
+        .stop();
+    let snapshot = controller
+        .receiver
+        .lock()
+        .expect("receiver runtime mutex")
+        .snapshot();
+
+    {
+        let mut state = controller.state.borrow_mut();
+        state.apply_receiver_snapshot(snapshot);
+        if let Err(error) = stop_transport {
+            state.diagnostics.push(DiagnosticEvent::warning(
+                "receiver",
+                format!("Receiver transport stop reported: {error}"),
+            ));
+        }
+        match result {
+            Ok(()) => state.diagnostics.push(DiagnosticEvent::info(
+                "receiver",
+                "Receiver mode stopped and released its playback and transport resources.",
+            )),
+            Err(error) => state.diagnostics.push(DiagnosticEvent::error(
+                "receiver",
+                format!("Failed to stop receiver mode: {error}"),
+            )),
+        }
+    }
+
+    refresh_ui(controller);
+}
+
+fn dashboard_page() -> (gtk::ScrolledWindow, DashboardWidgets) {
+    let (page, content) = page_shell(
+        "Home",
+        "Manage discovery, casting, audio routing, receiver mode, and diagnostics from a single Linux-native control surface.",
+    );
+
+    let quick_actions = section_box("Quick actions");
+    let action_buttons = gtk::Box::new(Orientation::Vertical, 12);
+    let open_devices_button = gtk::Button::with_label("Open discovered devices");
+    open_devices_button.add_css_class("suggested-action");
+    let open_casting_button = gtk::Button::with_label("Open casting controls");
+    let open_audio_button = gtk::Button::with_label("Open audio routing");
+    let open_receiver_button = gtk::Button::with_label("Open receiver mode");
+    action_buttons.append(&open_devices_button);
+    action_buttons.append(&open_casting_button);
+    action_buttons.append(&open_audio_button);
+    action_buttons.append(&open_receiver_button);
+    quick_actions.append(&action_buttons);
+    content.append(&quick_actions);
+
+    let overview_group = preferences_group(
+        "Overview",
+        Some("A live summary of the current application state."),
+    );
+    let session_row = summary_row("Session");
+    let discovery_row = summary_row("Discovery");
+    let casting_row = summary_row("Casting");
+    let audio_row = summary_row("Audio");
+    overview_group.add(&session_row);
+    overview_group.add(&discovery_row);
+    overview_group.add(&casting_row);
+    overview_group.add(&audio_row);
+    content.append(&overview_group);
+
+    let detail_group = preferences_group(
+        "Detailed status",
+        Some("This mirrors the internal session snapshots in a debuggable text view."),
+    );
+    let detail_label = detail_label();
+    detail_group.add(&label_row(&detail_label));
+    content.append(&detail_group);
 
     (
         page,
-        status_label,
-        receiver_selector,
-        mirror_target_selector,
+        DashboardWidgets {
+            session_row,
+            discovery_row,
+            casting_row,
+            audio_row,
+            detail_label,
+            open_devices_button,
+            open_casting_button,
+            open_audio_button,
+            open_receiver_button,
+        },
     )
 }
 
-fn receiver_page(
-    state: Rc<RefCell<AppState>>,
-    receiver: Arc<Mutex<ReceiverRuntime>>,
-    receiver_transport: Arc<Mutex<LanReceiverTransportServer>>,
-) -> (gtk::Box, gtk::Label, gtk::ComboBoxText) {
-    let page = gtk::Box::new(Orientation::Vertical, 12);
-    page.set_margin_top(24);
-    page.set_margin_bottom(24);
-    page.set_margin_start(24);
-    page.set_margin_end(24);
-
-    let heading = gtk::Label::new(Some("Receiver Mode"));
-    heading.add_css_class("title-1");
-    heading.set_halign(Align::Start);
-    page.append(&heading);
-
-    let summary = gtk::Label::new(Some(
-        "Receiver mode now owns a listening/runtime lifecycle, explicit packet buffering, Linux PipeWire playback, and transport-event metrics. The TCP receiver listener feeds connect/audio/keepalive/disconnect events into this runtime.",
-    ));
-    summary.set_wrap(true);
-    summary.set_halign(Align::Start);
-    page.append(&summary);
-
-    let receiver_output_selector = gtk::ComboBoxText::new();
-    refresh_playback_target_selector(
-        &receiver_output_selector,
-        &state.borrow(),
-        state.borrow().config.receiver.playback_target_id.as_deref(),
-        "Receiver output: system default",
+fn discovery_page() -> (gtk::ScrolledWindow, DiscoveryWidgets) {
+    let (page, content) = page_shell(
+        "Discovered devices",
+        "Receiver-capable devices appear here as they are advertised over mDNS. Queue them into a cast without leaving the page.",
     );
-    page.append(&receiver_output_selector);
 
-    let controls = gtk::Box::new(Orientation::Horizontal, 12);
-    let start_button = gtk::Button::with_label("Start Receiver");
-    let stop_button = gtk::Button::with_label("Stop Receiver");
-    controls.append(&start_button);
-    controls.append(&stop_button);
-    page.append(&controls);
+    let summary_group = preferences_group(
+        "Discovery status",
+        Some("Use this page to confirm visibility and add receivers quickly."),
+    );
+    let summary_row = summary_row("Current discovery status");
+    summary_group.add(&summary_row);
+    content.append(&summary_group);
 
-    let status_label = gtk::Label::new(Some(&format_receiver_status(&state.borrow())));
-    status_label.set_wrap(true);
-    status_label.set_selectable(true);
-    status_label.set_halign(Align::Start);
-    page.append(&status_label);
+    let device_section = section_box("Available devices");
+    let empty_state = empty_state(
+        "No devices discovered yet",
+        "Waiting for SynchroSonic devices to appear on the local network.",
+        "network-workgroup-symbolic",
+    );
+    let device_list = boxed_list();
+    device_section.append(&empty_state);
+    device_section.append(&device_list);
+    content.append(&device_section);
 
-    {
-        let state = Rc::clone(&state);
-        let receiver = Arc::clone(&receiver);
-        let status_label = status_label.clone();
-        receiver_output_selector.connect_changed(move |selector| {
-            let target_id = selector
-                .active_id()
-                .and_then(|id| playback_target_id_from_selection(id.as_str()));
-            if state.borrow().config.receiver.playback_target_id == target_id {
-                return;
-            }
-
-            let result = receiver
-                .lock()
-                .expect("receiver runtime mutex")
-                .set_playback_target(target_id.clone());
-            let snapshot = receiver.lock().expect("receiver runtime mutex").snapshot();
-            let mut state = state.borrow_mut();
-            state.select_receiver_playback_target(target_id.clone());
-            state.apply_receiver_snapshot(snapshot);
-
-            match result {
-                Ok(()) => {
-                    let scope = if matches!(
-                        state.receiver.state,
-                        synchrosonic_core::ReceiverServiceState::Connected
-                            | synchrosonic_core::ReceiverServiceState::Buffering
-                            | synchrosonic_core::ReceiverServiceState::Playing
-                    ) {
-                        "active receiver playback"
-                    } else {
-                        "next receiver playback session"
-                    };
-                    let selected_target = format_selected_playback_target(
-                        &state,
-                        state.config.receiver.playback_target_id.as_deref(),
-                    );
-                    state.diagnostics.push(DiagnosticEvent::info(
-                        "receiver",
-                        format!("Receiver output target set to {selected_target} for the {scope}."),
-                    ));
-                }
-                Err(error) => {
-                    state.diagnostics.push(DiagnosticEvent::warning(
-                        "receiver",
-                        format!("Failed to update receiver playback target: {error}"),
-                    ));
-                }
-            }
-
-            status_label.set_text(&format_receiver_status(&state));
-        });
-    }
-
-    {
-        let state = Rc::clone(&state);
-        let receiver = Arc::clone(&receiver);
-        let receiver_transport = Arc::clone(&receiver_transport);
-        let status_label = status_label.clone();
-        start_button.connect_clicked(move |_| {
-            let runtime_result = receiver.lock().expect("receiver runtime mutex").start();
-            match runtime_result {
-                Ok(()) => {
-                    let start_server = {
-                        let receiver_for_events = Arc::clone(&receiver);
-                        receiver_transport.lock().expect("receiver transport mutex").start(
-                            move |event| {
-                                receiver_for_events
-                                    .lock()
-                                    .map_err(|_| synchrosonic_core::ReceiverError::ThreadJoin)?
-                                    .submit_transport_event(event)
-                            },
-                        )
-                    };
-
-                    if let Err(error) = start_server {
-                        let _ = receiver.lock().expect("receiver runtime mutex").stop();
-                        let mut state = state.borrow_mut();
-                        state.diagnostics.push(DiagnosticEvent::error(
-                            "receiver",
-                            format!("Receiver transport listener failed to start: {error}"),
-                        ));
-                        status_label.set_text(&format_receiver_status(&state));
-                        return;
-                    }
-
-                    let snapshot = receiver.lock().expect("receiver runtime mutex").snapshot();
-                    let mut state = state.borrow_mut();
-                    state.apply_receiver_snapshot(snapshot.clone());
-                    state.diagnostics.push(DiagnosticEvent::info(
-                        "receiver",
-                        format!(
-                            "Receiver mode listening on {}:{} with {:?} latency preset and TCP transport ready.",
-                            snapshot.bind_host, snapshot.listen_port, snapshot.latency_preset
-                        ),
-                    ));
-                    status_label.set_text(&format_receiver_status(&state));
-                }
-                Err(error) => {
-                    let mut state = state.borrow_mut();
-                    state.diagnostics.push(DiagnosticEvent::error(
-                        "receiver",
-                        format!("Failed to start receiver mode: {error}"),
-                    ));
-                    status_label.set_text(&format_receiver_status(&state));
-                }
-            }
-        });
-    }
-
-    {
-        let state = Rc::clone(&state);
-        let receiver = Arc::clone(&receiver);
-        let receiver_transport = Arc::clone(&receiver_transport);
-        let status_label = status_label.clone();
-        stop_button.connect_clicked(move |_| {
-            let stop_transport = receiver_transport
-                .lock()
-                .expect("receiver transport mutex")
-                .stop();
-            let result = receiver.lock().expect("receiver runtime mutex").stop();
-            match result {
-                Ok(()) => {
-                    let snapshot = receiver.lock().expect("receiver runtime mutex").snapshot();
-                    let mut state = state.borrow_mut();
-                    state.apply_receiver_snapshot(snapshot);
-                    if let Err(error) = stop_transport {
-                        state.diagnostics.push(DiagnosticEvent::warning(
-                            "receiver",
-                            format!("Receiver transport stop reported: {error}"),
-                        ));
-                    }
-                    state.diagnostics.push(DiagnosticEvent::info(
-                        "receiver",
-                        "Receiver mode stopped and playback/transport resources were released.",
-                    ));
-                    status_label.set_text(&format_receiver_status(&state));
-                }
-                Err(error) => {
-                    let mut state = state.borrow_mut();
-                    state.diagnostics.push(DiagnosticEvent::error(
-                        "receiver",
-                        format!("Failed to stop receiver mode: {error}"),
-                    ));
-                    status_label.set_text(&format_receiver_status(&state));
-                }
-            }
-        });
-    }
-
-    (page, status_label, receiver_output_selector)
+    (
+        page,
+        DiscoveryWidgets {
+            summary_row,
+            device_list,
+            empty_state,
+        },
+    )
 }
 
-fn start_discovery_poll(
-    mut discovery: MdnsDiscoveryService,
-    state: Rc<RefCell<AppState>>,
-    devices_label: gtk::Label,
-    receiver_selector: gtk::ComboBoxText,
-) {
+fn casting_page() -> (gtk::ScrolledWindow, CastingWidgets) {
+    let (page, content) = page_shell(
+        "Active casting sessions",
+        "Add one or more discovered receivers, keep a local mirror if needed, and watch target health without burying the transport logic inside the UI.",
+    );
+
+    let controls_group = preferences_group(
+        "Cast controls",
+        Some("Receiver selection and local mirror routing for the sender side."),
+    );
+    let receiver_selector = gtk::ComboBoxText::new();
+    receiver_selector.set_hexpand(true);
+    let receiver_row = control_row(
+        "Receiver target",
+        "Choose a discovered receiver, then add it to the cast session.",
+        &receiver_selector,
+    );
+    let local_mirror_switch = gtk::Switch::new();
+    let mirror_switch_row = control_row(
+        "Mirror locally while casting",
+        "Keep playback on the sender while the network fan-out is active.",
+        &local_mirror_switch,
+    );
+    let local_output_selector = gtk::ComboBoxText::new();
+    local_output_selector.set_hexpand(true);
+    let mirror_output_row = control_row(
+        "Local mirror output",
+        "Choose a local playback sink for the optional sender-side mirror.",
+        &local_output_selector,
+    );
+    controls_group.add(&receiver_row);
+    controls_group.add(&mirror_switch_row);
+    controls_group.add(&mirror_output_row);
+    content.append(&controls_group);
+
+    let buttons = gtk::Box::new(Orientation::Horizontal, 12);
+    let add_button = gtk::Button::with_label("Add selected receiver");
+    add_button.add_css_class("suggested-action");
+    let stop_all_button = gtk::Button::with_label("Stop all casting");
+    buttons.append(&add_button);
+    buttons.append(&stop_all_button);
+    content.append(&buttons);
+
+    let summary_group = preferences_group(
+        "Session health",
+        Some("A concise summary of the sender session and local mirror branch."),
+    );
+    let session_row = summary_row("Cast session");
+    let mirror_row = summary_row("Local mirror");
+    summary_group.add(&session_row);
+    summary_group.add(&mirror_row);
+    content.append(&summary_group);
+
+    let targets_section = section_box("Queued and active targets");
+    let empty_state = empty_state(
+        "No active casting targets",
+        "Choose a receiver and add it to start a cast. You can queue multiple receivers one after another.",
+        "media-playback-start-symbolic",
+    );
+    let target_list = boxed_list();
+    targets_section.append(&empty_state);
+    targets_section.append(&target_list);
+    content.append(&targets_section);
+
+    let detail_group = preferences_group(
+        "Detailed sender state",
+        Some("Low-level transport, queue, and local mirror diagnostics."),
+    );
+    let detail_label = detail_label();
+    detail_group.add(&label_row(&detail_label));
+    content.append(&detail_group);
+
+    (
+        page,
+        CastingWidgets {
+            receiver_selector,
+            add_button,
+            stop_all_button,
+            local_mirror_switch,
+            local_output_selector,
+            session_row,
+            mirror_row,
+            target_list,
+            empty_state,
+            detail_label,
+        },
+    )
+}
+
+fn audio_page() -> (gtk::ScrolledWindow, AudioWidgets) {
+    let (page, content) = page_shell(
+        "Audio source and output selection",
+        "Choose the capture source used for sender sessions and inspect the playback outputs that local mirror and receiver mode can target.",
+    );
+
+    let selection_group = preferences_group(
+        "Current routing",
+        Some("Source selection is explicit and output targeting stays visible."),
+    );
+    let source_selector = gtk::ComboBoxText::new();
+    source_selector.set_hexpand(true);
+    let source_selector_row = control_row(
+        "Capture source",
+        "Choose the PipeWire source for future sender sessions.",
+        &source_selector,
+    );
+    let current_source_row = summary_row("Selected source");
+    let output_row = summary_row("Selected outputs");
+    selection_group.add(&source_selector_row);
+    selection_group.add(&current_source_row);
+    selection_group.add(&output_row);
+    content.append(&selection_group);
+
+    let sources_section = section_box("Available capture sources");
+    let sources_empty_state = empty_state(
+        "No capture sources found",
+        "PipeWire did not return any readable capture sources.",
+        "audio-input-microphone-symbolic",
+    );
+    let source_list = boxed_list();
+    sources_section.append(&sources_empty_state);
+    sources_section.append(&source_list);
+    content.append(&sources_section);
+
+    let outputs_section = section_box("Available playback outputs");
+    let outputs_empty_state = empty_state(
+        "No playback outputs found",
+        "PipeWire did not return any playback sinks for local mirror or receiver mode.",
+        "audio-speakers-symbolic",
+    );
+    let output_list = boxed_list();
+    outputs_section.append(&outputs_empty_state);
+    outputs_section.append(&output_list);
+    content.append(&outputs_section);
+
+    (
+        page,
+        AudioWidgets {
+            source_selector,
+            current_source_row,
+            output_row,
+            source_list,
+            output_list,
+            sources_empty_state,
+            outputs_empty_state,
+        },
+    )
+}
+
+fn receiver_page() -> (gtk::ScrolledWindow, ReceiverWidgets) {
+    let (page, content) = page_shell(
+        "Receiver mode",
+        "Run this machine as a LAN receiver, choose its playback output, and inspect sync and buffering health without losing the exact debug details.",
+    );
+
+    let controls_group = preferences_group(
+        "Receiver controls",
+        Some("Latency preset changes apply before starting receiver mode. Output changes can be requested at runtime."),
+    );
+    let latency_selector = gtk::ComboBoxText::new();
+    let latency_row = control_row(
+        "Latency preset",
+        "Low latency, balanced, or stable buffering behavior for receiver playback.",
+        &latency_selector,
+    );
+    let output_selector = gtk::ComboBoxText::new();
+    output_selector.set_hexpand(true);
+    let output_row = control_row(
+        "Playback output",
+        "Choose the system default sink or a specific local output, including Bluetooth when available.",
+        &output_selector,
+    );
+    controls_group.add(&latency_row);
+    controls_group.add(&output_row);
+    content.append(&controls_group);
+
+    let buttons = gtk::Box::new(Orientation::Horizontal, 12);
+    let start_button = gtk::Button::with_label("Start receiver mode");
+    start_button.add_css_class("suggested-action");
+    let stop_button = gtk::Button::with_label("Stop receiver mode");
+    buttons.append(&start_button);
+    buttons.append(&stop_button);
+    content.append(&buttons);
+
+    let summary_group = preferences_group(
+        "Receiver health",
+        Some("State, connection, and sync information that stays readable at a glance."),
+    );
+    let state_row = summary_row("Receiver state");
+    let connection_row = summary_row("Connection");
+    let sync_row = summary_row("Sync");
+    summary_group.add(&state_row);
+    summary_group.add(&connection_row);
+    summary_group.add(&sync_row);
+    content.append(&summary_group);
+
+    let detail_group = preferences_group(
+        "Detailed receiver state",
+        Some("Buffered audio, sync timing, metrics, and transport details."),
+    );
+    let detail_label = detail_label();
+    detail_group.add(&label_row(&detail_label));
+    content.append(&detail_group);
+
+    (
+        page,
+        ReceiverWidgets {
+            latency_selector,
+            output_selector,
+            start_button,
+            stop_button,
+            state_row,
+            connection_row,
+            sync_row,
+            detail_label,
+        },
+    )
+}
+
+fn diagnostics_page() -> (gtk::ScrolledWindow, DiagnosticsWidgets) {
+    let (page, content) = page_shell(
+        "Diagnostics and logs",
+        "Warnings, errors, and status transitions are surfaced here so transport and timing behavior stay understandable during early phases.",
+    );
+
+    let summary_group = preferences_group(
+        "Diagnostic summary",
+        Some("Clear the in-memory event list when you want a quieter view of the next action."),
+    );
+    let summary_row = summary_row("Recent diagnostic volume");
+    summary_group.add(&summary_row);
+    content.append(&summary_group);
+
+    let clear_button = gtk::Button::with_label("Clear diagnostics");
+    content.append(&clear_button);
+
+    let diagnostics_section = section_box("Recent events");
+    let empty_state = empty_state(
+        "No diagnostics recorded",
+        "Live state changes and warnings will appear here once the app does work.",
+        "dialog-information-symbolic",
+    );
+    let list_box = boxed_list();
+    diagnostics_section.append(&empty_state);
+    diagnostics_section.append(&list_box);
+    content.append(&diagnostics_section);
+
+    (
+        page,
+        DiagnosticsWidgets {
+            summary_row,
+            clear_button,
+            list_box,
+            empty_state,
+        },
+    )
+}
+
+fn settings_page() -> (gtk::ScrolledWindow, SettingsWidgets) {
+    let (page, content) = page_shell(
+        "Settings",
+        "Operational preferences are kept visible and explicit. Runtime behavior stays controlled instead of hiding state inside widgets.",
+    );
+
+    let settings_group = preferences_group(
+        "Run-time preferences",
+        Some("These controls affect the current run; durable persistence is planned next."),
+    );
+    let quality_selector = gtk::ComboBoxText::new();
+    let quality_row = control_row(
+        "Sender quality preset",
+        "Choose low latency, balanced, or high quality for future target negotiation.",
+        &quality_selector,
+    );
+    let theme_switch = gtk::Switch::new();
+    let theme_row = control_row(
+        "Prefer dark theme",
+        "Use a darker application appearance when possible.",
+        &theme_switch,
+    );
+    let verbose_logging_switch = gtk::Switch::new();
+    let logging_row = control_row(
+        "Verbose logging",
+        "Keep additional detail enabled for the current run.",
+        &verbose_logging_switch,
+    );
+    let summary_status_row = summary_row("Current configuration");
+    let note_status_row = summary_row("Next phase");
+    settings_group.add(&quality_row);
+    settings_group.add(&theme_row);
+    settings_group.add(&logging_row);
+    settings_group.add(&summary_status_row);
+    settings_group.add(&note_status_row);
+    content.append(&settings_group);
+
+    (
+        page,
+        SettingsWidgets {
+            quality_selector,
+            theme_switch,
+            verbose_logging_switch,
+            summary_row: summary_status_row,
+            note_row: note_status_row,
+        },
+    )
+}
+
+fn about_page() -> gtk::ScrolledWindow {
+    let (page, content) = page_shell(
+        "About",
+        "Project and contributor placeholders live here until release packaging and branding are finalized.",
+    );
+
+    let about_group = preferences_group(
+        "Project",
+        Some("Core metadata and scope for the current implementation."),
+    );
+    let project_row = summary_row("Project");
+    project_row.set_subtitle("SynchroSonic is a Linux-first Rust application for LAN audio capture, casting, receiver playback, diagnostics, and local output management.");
+    let developer_row = summary_row("Developer");
+    developer_row.set_subtitle("Maintainer placeholder: update with the project owner or contributor credits before release.");
+    let source_row = summary_row("Open source");
+    source_row.set_subtitle(
+        "GPL-3.0-or-later. Repository placeholder: https://github.com/synchrosonic/synchrosonic",
+    );
+    let scope_row = summary_row("Current Bluetooth scope");
+    scope_row.set_subtitle("Bluetooth is treated as a local playback-output choice on Linux, not as a separate streaming transport or receiver discovery path.");
+    about_group.add(&project_row);
+    about_group.add(&developer_row);
+    about_group.add(&source_row);
+    about_group.add(&scope_row);
+    content.append(&about_group);
+
+    page
+}
+
+fn page_shell(title: &str, subtitle: &str) -> (gtk::ScrolledWindow, gtk::Box) {
+    let body = gtk::Box::new(Orientation::Vertical, 18);
+    body.set_margin_top(24);
+    body.set_margin_bottom(24);
+    body.set_margin_start(24);
+    body.set_margin_end(24);
+
+    let header = gtk::Box::new(Orientation::Vertical, 6);
+    let title_label = gtk::Label::new(Some(title));
+    title_label.add_css_class("title-1");
+    title_label.set_halign(Align::Start);
+    let subtitle_label = gtk::Label::new(Some(subtitle));
+    subtitle_label.add_css_class("dim-label");
+    subtitle_label.set_wrap(true);
+    subtitle_label.set_halign(Align::Start);
+    header.append(&title_label);
+    header.append(&subtitle_label);
+    body.append(&header);
+
+    let scrolled = gtk::ScrolledWindow::new();
+    scrolled.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+    scrolled.set_hexpand(true);
+    scrolled.set_vexpand(true);
+    scrolled.set_child(Some(&body));
+
+    (scrolled, body)
+}
+
+fn preferences_group(title: &str, description: Option<&str>) -> adw::PreferencesGroup {
+    let group = adw::PreferencesGroup::new();
+    group.set_title(title);
+    group.set_description(description);
+    group
+}
+
+fn summary_row(title: &str) -> adw::ActionRow {
+    let row = adw::ActionRow::new();
+    row.set_title(title);
+    row.set_subtitle("Waiting for state updates.");
+    row
+}
+
+fn control_row(title: &str, subtitle: &str, widget: &impl IsA<gtk::Widget>) -> adw::ActionRow {
+    let row = adw::ActionRow::new();
+    row.set_title(title);
+    row.set_subtitle(subtitle);
+    row.add_suffix(widget);
+    row
+}
+
+fn detail_label() -> gtk::Label {
+    let label = gtk::Label::new(None);
+    label.set_wrap(true);
+    label.set_selectable(true);
+    label.set_halign(Align::Start);
+    label.set_xalign(0.0);
+    label
+}
+
+fn label_row(label: &gtk::Label) -> adw::ActionRow {
+    let row = adw::ActionRow::new();
+    row.set_title("Snapshot");
+    row.set_subtitle("");
+    row.add_suffix(label);
+    row
+}
+
+fn section_box(title: &str) -> gtk::Box {
+    let section = gtk::Box::new(Orientation::Vertical, 12);
+    let heading = gtk::Label::new(Some(title));
+    heading.add_css_class("title-4");
+    heading.set_halign(Align::Start);
+    section.append(&heading);
+    section
+}
+
+fn boxed_list() -> gtk::ListBox {
+    let list = gtk::ListBox::new();
+    list.add_css_class("boxed-list");
+    list.set_selection_mode(gtk::SelectionMode::None);
+    list
+}
+
+fn empty_state(title: &str, description: &str, icon_name: &str) -> adw::StatusPage {
+    let page = adw::StatusPage::new();
+    page.set_title(title);
+    page.set_description(Some(description));
+    page.set_icon_name(Some(icon_name));
+    page
+}
+
+fn start_discovery_poll(mut discovery: MdnsDiscoveryService, controller: UiController) {
     glib::timeout_add_seconds_local(1, move || {
         loop {
             match discovery.poll_event() {
-                Ok(Some(event)) => state.borrow_mut().apply_discovery_event(event),
+                Ok(Some(event)) => controller.state.borrow_mut().apply_discovery_event(event),
                 Ok(None) => break,
                 Err(error) => {
-                    state
+                    controller
+                        .state
                         .borrow_mut()
                         .diagnostics
                         .push(DiagnosticEvent::warning(
@@ -886,10 +1984,11 @@ fn start_discovery_poll(
         match discovery.prune_stale() {
             Ok(events) => {
                 for event in events {
-                    state.borrow_mut().apply_discovery_event(event);
+                    controller.state.borrow_mut().apply_discovery_event(event);
                 }
             }
-            Err(error) => state
+            Err(error) => controller
+                .state
                 .borrow_mut()
                 .diagnostics
                 .push(DiagnosticEvent::warning(
@@ -898,32 +1997,30 @@ fn start_discovery_poll(
                 )),
         }
 
-        state
+        controller
+            .state
             .borrow_mut()
             .apply_discovery_snapshot(discovery.snapshot());
-        devices_label.set_text(&format_discovery_devices(&state.borrow()));
-        refresh_receiver_selector(&receiver_selector, &state.borrow());
+        refresh_ui(&controller);
         ControlFlow::Continue
     });
 }
 
-fn start_receiver_poll(
-    receiver: Arc<Mutex<ReceiverRuntime>>,
-    receiver_transport: Arc<Mutex<LanReceiverTransportServer>>,
-    state: Rc<RefCell<AppState>>,
-    receiver_status_label: gtk::Label,
-    dashboard_status_label: gtk::Label,
-    audio_backend_name: String,
-    audio_source_summary: String,
-) {
+fn start_receiver_poll(controller: UiController) {
     glib::timeout_add_seconds_local(1, move || {
-        let snapshot = receiver.lock().expect("receiver runtime mutex").snapshot();
-        let transport_snapshot = receiver_transport
+        let snapshot = controller
+            .receiver
+            .lock()
+            .expect("receiver runtime mutex")
+            .snapshot();
+        let transport_snapshot = controller
+            .receiver_transport
             .lock()
             .expect("receiver transport mutex")
             .snapshot();
+
         {
-            let mut state = state.borrow_mut();
+            let mut state = controller.state.borrow_mut();
             let state_changed = state.receiver.state != snapshot.state;
             let last_error_changed = state.receiver.last_error != snapshot.last_error;
             let sync_state_changed = state.receiver.sync.state != snapshot.sync.state;
@@ -997,31 +2094,21 @@ fn start_receiver_poll(
                     ));
                 }
             }
-
-            receiver_status_label.set_text(&format_receiver_status(&state));
-            dashboard_status_label.set_text(&format_dashboard_status(
-                &state,
-                &audio_backend_name,
-                &audio_source_summary,
-            ));
         }
 
+        refresh_ui(&controller);
         ControlFlow::Continue
     });
 }
 
-fn start_streaming_poll(
-    sender: Arc<Mutex<LanSenderSession>>,
-    state: Rc<RefCell<AppState>>,
-    streaming_status_label: gtk::Label,
-    dashboard_status_label: gtk::Label,
-    receiver_selector: gtk::ComboBoxText,
-    audio_backend_name: String,
-    audio_source_summary: String,
-) {
+fn start_streaming_poll(controller: UiController) {
     glib::timeout_add_seconds_local(1, move || {
-        let snapshot = sender.lock().expect("sender session mutex").snapshot();
-        let previous_snapshot = state.borrow().streaming.clone();
+        let snapshot = controller
+            .sender
+            .lock()
+            .expect("sender session mutex")
+            .snapshot();
+        let previous_snapshot = controller.state.borrow().streaming.clone();
         let state_message = if previous_snapshot.state != snapshot.state {
             Some(format!("Sender stream state is now {:?}", snapshot.state))
         } else {
@@ -1058,7 +2145,7 @@ fn start_streaming_poll(
             stream_target_transition_messages(&previous_snapshot.targets, &snapshot.targets);
 
         {
-            let mut state = state.borrow_mut();
+            let mut state = controller.state.borrow_mut();
             state.apply_streaming_snapshot(snapshot);
             if let Some(message) = state_message {
                 state
@@ -1083,46 +2170,73 @@ fn start_streaming_poll(
             for message in target_messages {
                 state.diagnostics.push(message);
             }
-
-            streaming_status_label.set_text(&format_streaming_status(&state));
-            dashboard_status_label.set_text(&format_dashboard_status(
-                &state,
-                &audio_backend_name,
-                &audio_source_summary,
-            ));
-            refresh_receiver_selector(&receiver_selector, &state);
         }
 
+        refresh_ui(&controller);
         ControlFlow::Continue
     });
 }
 
-fn start_playback_target_poll(
-    audio_backend: LinuxAudioBackend,
-    sender: Arc<Mutex<LanSenderSession>>,
-    receiver: Arc<Mutex<ReceiverRuntime>>,
-    state: Rc<RefCell<AppState>>,
-    local_output_selector: gtk::ComboBoxText,
-    receiver_output_selector: gtk::ComboBoxText,
-    streaming_status_label: gtk::Label,
-    receiver_status_label: gtk::Label,
-    dashboard_status_label: gtk::Label,
-    audio_backend_name: String,
-    audio_source_summary: String,
-) {
-    let mut last_error = None::<String>;
+fn start_audio_inventory_poll(controller: UiController) {
+    let mut last_source_error = None::<String>;
+    let mut last_playback_error = None::<String>;
 
     glib::timeout_add_seconds_local(1, move || {
-        match audio_backend.list_playback_targets() {
+        match controller.audio_backend.list_sources() {
+            Ok(sources) => {
+                last_source_error = None;
+                let mut source_change_message = None::<DiagnosticEvent>;
+                {
+                    let mut state = controller.state.borrow_mut();
+                    let previous_selected = state.selected_audio_source_id.clone();
+                    let previous_sources = state.audio_sources.len();
+                    state.set_audio_sources(sources);
+                    if previous_selected != state.selected_audio_source_id {
+                        source_change_message = Some(DiagnosticEvent::warning(
+                            "audio",
+                            format!(
+                                "Capture source inventory changed; selected source is now {}.",
+                                format_selected_audio_source(&state)
+                            ),
+                        ));
+                    } else if previous_sources == 0 && !state.audio_sources.is_empty() {
+                        source_change_message = Some(DiagnosticEvent::info(
+                            "audio",
+                            format!(
+                                "Detected {} capture source(s) from {}.",
+                                state.audio_sources.len(),
+                                controller.context.audio_backend_name
+                            ),
+                        ));
+                    }
+                    if let Some(message) = source_change_message.take() {
+                        state.diagnostics.push(message);
+                    }
+                }
+            }
+            Err(error) => {
+                let message = format!("PipeWire source enumeration failed: {error}");
+                if last_source_error.as_deref() != Some(message.as_str()) {
+                    controller
+                        .state
+                        .borrow_mut()
+                        .diagnostics
+                        .push(DiagnosticEvent::warning("audio", message.clone()));
+                }
+                last_source_error = Some(message);
+            }
+        }
+
+        match controller.audio_backend.list_playback_targets() {
             Ok(targets) => {
-                last_error = None;
+                last_playback_error = None;
 
                 let mut local_retry_target = None::<Option<String>>;
                 let mut local_transition_message = None::<DiagnosticEvent>;
                 let mut receiver_transition_message = None::<DiagnosticEvent>;
 
                 {
-                    let mut state = state.borrow_mut();
+                    let mut state = controller.state.borrow_mut();
                     let targets_changed = state.playback_targets != targets;
                     let previous_local_available = state.local_playback_target_available();
                     let previous_receiver_available = state.receiver_playback_target_available();
@@ -1164,32 +2278,33 @@ fn start_playback_target_poll(
                         ));
                     }
 
-                    if targets_changed
-                        || previous_local_available != local_available
-                        || previous_receiver_available != receiver_available
+                    if let Some(message) = local_transition_message.take() {
+                        state.diagnostics.push(message);
+                    }
+                    if let Some(message) = receiver_transition_message.take() {
+                        state.diagnostics.push(message);
+                    }
+
+                    if !targets_changed
+                        && previous_local_available == local_available
+                        && previous_receiver_available == receiver_available
                     {
-                        refresh_playback_target_selector(
-                            &local_output_selector,
-                            &state,
-                            state.config.audio.local_playback_target_id.as_deref(),
-                            "Local mirror output: system default",
-                        );
-                        refresh_playback_target_selector(
-                            &receiver_output_selector,
-                            &state,
-                            state.config.receiver.playback_target_id.as_deref(),
-                            "Receiver output: system default",
-                        );
+                        // No-op; we still refresh the UI below in case source inventory changed.
                     }
                 }
 
                 if let Some(target_id) = local_retry_target.flatten() {
-                    let retry_result = sender
+                    let retry_result = controller
+                        .sender
                         .lock()
                         .expect("sender session mutex")
                         .set_local_playback_target(Some(target_id.clone()));
-                    let snapshot = sender.lock().expect("sender session mutex").snapshot();
-                    let mut state = state.borrow_mut();
+                    let snapshot = controller
+                        .sender
+                        .lock()
+                        .expect("sender session mutex")
+                        .snapshot();
+                    let mut state = controller.state.borrow_mut();
                     state.apply_streaming_snapshot(snapshot);
                     match retry_result {
                         Ok(()) => {
@@ -1212,40 +2327,41 @@ fn start_playback_target_poll(
                         )),
                     }
                 }
-
-                let snapshot = receiver.lock().expect("receiver runtime mutex").snapshot();
-                {
-                    let mut state = state.borrow_mut();
-                    state.apply_receiver_snapshot(snapshot);
-                    if let Some(message) = local_transition_message {
-                        state.diagnostics.push(message);
-                    }
-                    if let Some(message) = receiver_transition_message {
-                        state.diagnostics.push(message);
-                    }
-                    streaming_status_label.set_text(&format_streaming_status(&state));
-                    receiver_status_label.set_text(&format_receiver_status(&state));
-                    dashboard_status_label.set_text(&format_dashboard_status(
-                        &state,
-                        &audio_backend_name,
-                        &audio_source_summary,
-                    ));
-                }
             }
             Err(error) => {
                 let message = format!("PipeWire playback target enumeration failed: {error}");
-                if last_error.as_deref() != Some(message.as_str()) {
-                    state
+                if last_playback_error.as_deref() != Some(message.as_str()) {
+                    controller
+                        .state
                         .borrow_mut()
                         .diagnostics
                         .push(DiagnosticEvent::warning("audio", message.clone()));
                 }
-                last_error = Some(message);
+                last_playback_error = Some(message);
             }
         }
 
+        refresh_ui(&controller);
         ControlFlow::Continue
     });
+}
+
+fn refresh_audio_inventory(audio_backend: &LinuxAudioBackend, state: &mut AppState) {
+    match audio_backend.list_sources() {
+        Ok(sources) => state.set_audio_sources(sources),
+        Err(error) => state.diagnostics.push(DiagnosticEvent::warning(
+            "audio",
+            format!("PipeWire source enumeration failed: {error}"),
+        )),
+    }
+
+    match audio_backend.list_playback_targets() {
+        Ok(targets) => state.set_playback_targets(targets),
+        Err(error) => state.diagnostics.push(DiagnosticEvent::warning(
+            "audio",
+            format!("PipeWire playback target enumeration failed: {error}"),
+        )),
+    }
 }
 
 fn playback_target_transition_diagnostic(
@@ -1278,6 +2394,35 @@ fn playback_target_id_from_selection(selection_id: &str) -> Option<String> {
     } else {
         Some(selection_id.to_string())
     }
+}
+
+fn refresh_audio_source_selector(selector: &gtk::ComboBoxText, state: &AppState) {
+    selector.remove_all();
+    for source in &state.audio_sources {
+        selector.append(Some(source.id.as_str()), &source.display_name);
+    }
+
+    if let Some(selected_id) = state.selected_audio_source_id.as_deref() {
+        selector.set_active_id(Some(selected_id));
+    } else if !state.audio_sources.is_empty() {
+        selector.set_active(Some(0));
+    }
+}
+
+fn refresh_quality_selector(selector: &gtk::ComboBoxText, preset: QualityPreset) {
+    selector.remove_all();
+    selector.append(Some(QUALITY_LOW_LATENCY_ID), "Low latency");
+    selector.append(Some(QUALITY_BALANCED_ID), "Balanced");
+    selector.append(Some(QUALITY_HIGH_QUALITY_ID), "High quality");
+    selector.set_active_id(Some(quality_preset_id(preset)));
+}
+
+fn refresh_latency_selector(selector: &gtk::ComboBoxText, preset: ReceiverLatencyPreset) {
+    selector.remove_all();
+    selector.append(Some(LATENCY_LOW_ID), "Low latency");
+    selector.append(Some(LATENCY_BALANCED_ID), "Balanced");
+    selector.append(Some(LATENCY_STABLE_ID), "Stable");
+    selector.set_active_id(Some(latency_preset_id(preset)));
 }
 
 fn refresh_playback_target_selector(
@@ -1338,48 +2483,101 @@ fn format_selected_playback_target(state: &AppState, target_id: Option<&str>) ->
     }
 }
 
-fn format_discovery_devices(state: &AppState) -> String {
-    if state.discovered_devices.is_empty() {
-        return "No SynchroSonic devices discovered yet.".to_string();
-    }
-
+fn format_selected_audio_source(state: &AppState) -> String {
     state
-        .discovered_devices
-        .iter()
-        .map(|device| {
+        .selected_audio_source_id
+        .as_deref()
+        .and_then(|id| state.audio_sources.iter().find(|source| source.id == id))
+        .map(|source| {
             format!(
-                "{}\n  id: {}\n  version: {}\n  availability: {:?}\n  capabilities: sender={}, receiver={}, local_output={}, bluetooth={}\n  endpoint: {}",
-                device.display_name,
-                device.id,
-                device.app_version,
-                device.availability,
-                device.capabilities.supports_sender,
-                device.capabilities.supports_receiver,
-                device.capabilities.supports_local_output,
-                device.capabilities.supports_bluetooth_output,
-                device
-                    .endpoint
-                    .as_ref()
-                    .map(|endpoint| endpoint.address.to_string())
-                    .unwrap_or_else(|| "unresolved".to_string())
+                "{} ({})",
+                source.display_name,
+                audio_source_kind_label(source.kind)
             )
         })
-        .collect::<Vec<_>>()
-        .join("\n\n")
+        .unwrap_or_else(|| "No capture source selected".to_string())
 }
 
-fn about_page() -> gtk::Box {
-    status_page(
-        "About",
-        "SynchroSonic is a Linux-first Rust desktop app for LAN audio streaming. Bluetooth support is modeled as a local playback-output capability on the sender or receiver device, not as a separate transport path.",
+fn format_device_row_subtitle(state: &AppState, device: &DiscoveredDevice) -> String {
+    let selected_suffix = if state.selected_receiver_device_id.as_ref() == Some(&device.id) {
+        " Selected for manual cast actions."
+    } else {
+        ""
+    };
+    let active_suffix = if state.streaming.target(&device.id).is_some() {
+        " Currently queued in the active cast."
+    } else {
+        ""
+    };
+    format!(
+        "Status: {:?}, availability: {:?}, endpoint: {}, receiver={}, local_output={}, bluetooth={}.{}{}",
+        device.status,
+        device.availability,
+        device
+            .endpoint
+            .as_ref()
+            .map(|endpoint| endpoint.address.to_string())
+            .unwrap_or_else(|| "unresolved".to_string()),
+        device.capabilities.supports_receiver,
+        device.capabilities.supports_local_output,
+        device.capabilities.supports_bluetooth_output,
+        selected_suffix,
+        active_suffix
     )
 }
 
-fn format_dashboard_status(
-    state: &AppState,
-    audio_backend_name: &str,
-    audio_source_summary: &str,
-) -> String {
+fn format_target_row_subtitle(target: &StreamTargetSnapshot) -> String {
+    format!(
+        "{:?} with {:?} health, endpoint {}, latency {:?} ms, buffer {}%, dropped {} packet(s).",
+        target.state,
+        target.health,
+        target.endpoint,
+        target.metrics.latency_estimate_ms,
+        target.network_buffer.fill_percent(),
+        target.network_buffer.dropped_packets
+    )
+}
+
+fn format_audio_source_row_subtitle(state: &AppState, source: &AudioSource) -> String {
+    let selected = if state.selected_audio_source_id.as_deref() == Some(source.id.as_str()) {
+        "selected"
+    } else {
+        "available"
+    };
+    let default = if source.is_default { ", default" } else { "" };
+    format!(
+        "{} source, {}{}",
+        audio_source_kind_label(source.kind),
+        selected,
+        default
+    )
+}
+
+fn format_playback_target_inventory_subtitle(state: &AppState, target: &PlaybackTarget) -> String {
+    let selected_local =
+        state.config.audio.local_playback_target_id.as_deref() == Some(target.id.as_str());
+    let selected_receiver =
+        state.config.receiver.playback_target_id.as_deref() == Some(target.id.as_str());
+    let selected_suffix = match (selected_local, selected_receiver) {
+        (true, true) => "Selected for local mirror and receiver mode.",
+        (true, false) => "Selected for local mirror.",
+        (false, true) => "Selected for receiver mode.",
+        (false, false) => "Not currently selected.",
+    };
+    format!(
+        "{} output, availability {:?}, default={}, {}",
+        if target.is_bluetooth() {
+            "Bluetooth"
+        } else {
+            "Standard"
+        },
+        target.availability,
+        target.is_default,
+        selected_suffix
+    )
+}
+
+fn format_dashboard_status(state: &AppState, audio_backend_name: &str) -> String {
     let healthy_targets = state.streaming.healthy_target_count();
     let bluetooth_outputs = state
         .playback_targets
@@ -1387,19 +2585,16 @@ fn format_dashboard_status(
         .filter(|target| target.is_bluetooth())
         .count();
     format!(
-        "Session: {:?}\nCapture: {:?}\nStreaming: {:?}\nSelected receiver: {}\nTarget sessions: total={} healthy={}\nPlayback outputs: total={} bluetooth={}\nLocal mirror output: {} (available={})\nReceiver output: {} (available={})\nLocal mirror: desired={} state={:?} buffer={}% ({} / {} packets, dropped={}) played packets={} bytes={} error={}\nSender aggregate metrics: packets sent={} bytes sent={} bitrate={}bps latency={:?}ms gaps={} keepalives={}/{}\nReceiver: {:?}\nReceiver buffer: {}% ({} / {} packets)\nReceiver metrics: packets in={} played={} underruns={} overruns={} reconnects={}\nAudio backend: {}\n{}\nDefault stream port: {}\nLocal playback default: {}",
+        "Session: {:?}\nCapture: {:?}\nStreaming: {:?}\nSelected receiver: {}\nTarget sessions: total={} healthy={}\nPlayback outputs: total={} bluetooth={}\nSelected source: {}\nLocal mirror output: {} (available={})\nReceiver output: {} (available={})\nLocal mirror: desired={} state={:?} buffer={}% ({} / {} packets, dropped={}) played packets={} bytes={} error={}\nSender aggregate metrics: packets sent={} bytes sent={} bitrate={}bps latency={:?}ms gaps={} keepalives={}/{}\nReceiver: {:?}\nReceiver buffer: {}% ({} / {} packets)\nReceiver metrics: packets in={} played={} underruns={} overruns={} reconnects={}\nAudio backend: {}\nDefault stream port: {}\nSender quality preset: {}\nReceiver latency preset: {}\nLocal playback default: {}",
         state.cast_session,
         state.capture_state,
         state.streaming.state,
-        state
-            .selected_receiver_device_id
-            .as_ref()
-            .map(ToString::to_string)
-            .unwrap_or_else(|| "none".to_string()),
+        selected_receiver_label(state),
         state.streaming.active_target_count(),
         healthy_targets,
         state.playback_targets.len(),
         bluetooth_outputs,
+        format_selected_audio_source(state),
         format_selected_playback_target(state, state.config.audio.local_playback_target_id.as_deref()),
         state.local_playback_target_available(),
         format_selected_playback_target(state, state.config.receiver.playback_target_id.as_deref()),
@@ -1435,8 +2630,9 @@ fn format_dashboard_status(
         state.receiver.metrics.overruns,
         state.receiver.metrics.reconnect_attempts,
         audio_backend_name,
-        audio_source_summary,
         state.config.transport.stream_port,
+        format_quality_preset(state.config.transport.quality),
+        format_latency_preset(state.config.receiver.latency_preset),
         if state.config.audio.local_playback_enabled {
             "enabled"
         } else {
@@ -1448,11 +2644,7 @@ fn format_dashboard_status(
 fn format_streaming_status(state: &AppState) -> String {
     let stream = &state.streaming;
     let local_mirror = &stream.local_mirror;
-    let selected_device = state
-        .selected_receiver_device_id
-        .as_ref()
-        .map(ToString::to_string)
-        .unwrap_or_else(|| "none".to_string());
+    let selected_device = selected_receiver_label(state);
     let stream_shape = stream
         .stream
         .as_ref()
@@ -1470,10 +2662,11 @@ fn format_streaming_status(state: &AppState) -> String {
     let target_status = format_stream_target_statuses(&stream.targets);
 
     format!(
-        "State: {:?}\nSelected receiver id: {}\nSender session id: {}\nStream: {}\nActive target count: {}\nTargets:\n{}\nLocal mirror output: {} (available={})\nLocal mirror: desired={} state={:?} backend={} target={} buffer={}% ({} / {} packets, dropped={}) played packets={} bytes={} error={}\nAggregate metrics: packets sent={} packets received={} bytes sent={} bytes received={} bitrate={}bps latency estimate={:?}ms packet gaps={} keepalives sent={} keepalives received={}\nLast error: {}\nSplit-stream path: PipeWire capture -> explicit branch fan-out -> [per-target bounded network queue -> per-target TCP framed transport -> receiver runtime -> PipeWire playback] + [bounded local mirror queue -> sender-side PipeWire playback].",
+        "State: {:?}\nSelected receiver: {}\nSender session id: {}\nCapture source: {}\nStream: {}\nActive target count: {}\nTargets:\n{}\nLocal mirror output: {} (available={})\nLocal mirror: desired={} state={:?} backend={} target={} buffer={}% ({} / {} packets, dropped={}) played packets={} bytes={} error={}\nAggregate metrics: packets sent={} packets received={} bytes sent={} bytes received={} bitrate={}bps latency estimate={:?}ms packet gaps={} keepalives sent={} keepalives received={}\nSender quality preset: {}\nLast error: {}\nSplit-stream path: PipeWire capture -> explicit branch fan-out -> [per-target bounded network queue -> per-target TCP framed transport -> receiver runtime -> PipeWire playback] + [bounded local mirror queue -> sender-side PipeWire playback].",
         stream.state,
         selected_device,
         stream.session_id.as_deref().unwrap_or("not started"),
+        format_selected_audio_source(state),
         stream_shape,
         stream.active_target_count(),
         target_status,
@@ -1502,6 +2695,7 @@ fn format_streaming_status(state: &AppState) -> String {
         stream.metrics.packet_gaps,
         stream.metrics.keepalives_sent,
         stream.metrics.keepalives_received,
+        format_quality_preset(state.config.transport.quality),
         last_error
     )
 }
@@ -1623,7 +2817,13 @@ fn refresh_receiver_selector(selector: &gtk::ComboBoxText, state: &AppState) {
 
     if let Some(active_id) = active_id {
         selector.set_active_id(Some(&active_id));
-    } else if !state.discovered_devices.is_empty() {
+    } else if !state
+        .discovered_devices
+        .iter()
+        .filter(|device| device.capabilities.supports_receiver)
+        .collect::<Vec<_>>()
+        .is_empty()
+    {
         selector.set_active(Some(0));
     }
 }
@@ -1669,12 +2869,12 @@ fn format_receiver_status(state: &AppState) -> String {
     let last_error = receiver.last_error.as_deref().unwrap_or("none");
 
     format!(
-        "State: {:?}\nAdvertised name: {}\nListen address: {}:{}\nLatency preset: {:?}\nPlayback backend: {}\nPlayback target: {} (available={})\nConnection: {}\nBuffer: {} packet(s), {} frame(s), {} ms queued, target {} ms, max {} ms, {}% full\nSync: state={:?} expected={} ms requested={} queued={} ms buffer delta={} ms schedule error={} ms late drops={} resets={} last sender ts={} last sender unix={}\nMetrics: packets in={} frames in={} bytes in={} packets out={} frames out={} bytes out={} underruns={} overruns={} reconnect attempts={}\nLast error: {}\nInternal app flow: use the Start/Stop buttons here; the TCP receiver listener already submits Connected, AudioPacket, KeepAlive, and Disconnected events into the runtime.",
+        "State: {:?}\nAdvertised name: {}\nListen address: {}:{}\nLatency preset: {}\nPlayback backend: {}\nPlayback target: {} (available={})\nConnection: {}\nBuffer: {} packet(s), {} frame(s), {} ms queued, target {} ms, max {} ms, {}% full\nSync: state={:?} expected={} ms requested={} queued={} ms buffer delta={} ms schedule error={} ms late drops={} resets={} last sender ts={} last sender unix={}\nMetrics: packets in={} frames in={} bytes in={} packets out={} frames out={} bytes out={} underruns={} overruns={} reconnect attempts={}\nLast error: {}\nInternal app flow: use the Start/Stop buttons here; the TCP receiver listener already submits Connected, AudioPacket, KeepAlive, and Disconnected events into the runtime.",
         receiver.state,
         receiver.advertised_name,
         receiver.bind_host,
         receiver.listen_port,
-        receiver.latency_preset,
+        format_latency_preset(receiver.latency_preset),
         receiver
             .playback_backend
             .as_deref()
@@ -1721,4 +2921,138 @@ fn format_receiver_status(state: &AppState) -> String {
         receiver.metrics.reconnect_attempts,
         last_error
     )
+}
+
+fn quality_preset_id(preset: QualityPreset) -> &'static str {
+    match preset {
+        QualityPreset::LowLatency => QUALITY_LOW_LATENCY_ID,
+        QualityPreset::Balanced => QUALITY_BALANCED_ID,
+        QualityPreset::HighQuality => QUALITY_HIGH_QUALITY_ID,
+    }
+}
+
+fn quality_preset_from_id(value: &str) -> Option<QualityPreset> {
+    match value {
+        QUALITY_LOW_LATENCY_ID => Some(QualityPreset::LowLatency),
+        QUALITY_BALANCED_ID => Some(QualityPreset::Balanced),
+        QUALITY_HIGH_QUALITY_ID => Some(QualityPreset::HighQuality),
+        _ => None,
+    }
+}
+
+fn latency_preset_id(preset: ReceiverLatencyPreset) -> &'static str {
+    match preset {
+        ReceiverLatencyPreset::LowLatency => LATENCY_LOW_ID,
+        ReceiverLatencyPreset::Balanced => LATENCY_BALANCED_ID,
+        ReceiverLatencyPreset::Stable => LATENCY_STABLE_ID,
+    }
+}
+
+fn latency_preset_from_id(value: &str) -> Option<ReceiverLatencyPreset> {
+    match value {
+        LATENCY_LOW_ID => Some(ReceiverLatencyPreset::LowLatency),
+        LATENCY_BALANCED_ID => Some(ReceiverLatencyPreset::Balanced),
+        LATENCY_STABLE_ID => Some(ReceiverLatencyPreset::Stable),
+        _ => None,
+    }
+}
+
+fn format_quality_preset(preset: QualityPreset) -> &'static str {
+    match preset {
+        QualityPreset::LowLatency => "Low latency",
+        QualityPreset::Balanced => "Balanced",
+        QualityPreset::HighQuality => "High quality",
+    }
+}
+
+fn format_latency_preset(preset: ReceiverLatencyPreset) -> &'static str {
+    match preset {
+        ReceiverLatencyPreset::LowLatency => "Low latency",
+        ReceiverLatencyPreset::Balanced => "Balanced",
+        ReceiverLatencyPreset::Stable => "Stable",
+    }
+}
+
+fn selected_receiver_label(state: &AppState) -> String {
+    state
+        .selected_receiver_device_id
+        .as_ref()
+        .and_then(|selected_id| {
+            state
+                .discovered_devices
+                .iter()
+                .find(|device| &device.id == selected_id)
+        })
+        .map(|device| device.display_name.clone())
+        .or_else(|| {
+            state
+                .selected_receiver_device_id
+                .as_ref()
+                .map(ToString::to_string)
+        })
+        .unwrap_or_else(|| "none".to_string())
+}
+
+fn audio_source_kind_label(kind: AudioSourceKind) -> &'static str {
+    match kind {
+        AudioSourceKind::Monitor => "Monitor",
+        AudioSourceKind::Microphone => "Microphone",
+        AudioSourceKind::Application => "Application",
+    }
+}
+
+fn audio_source_icon_name(kind: AudioSourceKind) -> &'static str {
+    match kind {
+        AudioSourceKind::Monitor => "audio-card-symbolic",
+        AudioSourceKind::Microphone => "audio-input-microphone-symbolic",
+        AudioSourceKind::Application => "application-x-executable-symbolic",
+    }
+}
+
+fn playback_target_icon_name(target: &PlaybackTarget) -> &'static str {
+    if target.is_bluetooth() {
+        "bluetooth-active-symbolic"
+    } else {
+        "audio-speakers-symbolic"
+    }
+}
+
+fn status_icon_name(status: synchrosonic_core::DeviceStatus) -> &'static str {
+    match status {
+        synchrosonic_core::DeviceStatus::Discovered => "network-wireless-signal-excellent-symbolic",
+        synchrosonic_core::DeviceStatus::Connecting => "network-transmit-receive-symbolic",
+        synchrosonic_core::DeviceStatus::Connected => "object-select-symbolic",
+        synchrosonic_core::DeviceStatus::Unavailable => "dialog-warning-symbolic",
+    }
+}
+
+fn diagnostic_icon_name(level: DiagnosticLevel) -> &'static str {
+    match level {
+        DiagnosticLevel::Info => "dialog-information-symbolic",
+        DiagnosticLevel::Warning => "dialog-warning-symbolic",
+        DiagnosticLevel::Error => "dialog-error-symbolic",
+    }
+}
+
+fn diagnostic_level_label(level: DiagnosticLevel) -> &'static str {
+    match level {
+        DiagnosticLevel::Info => "Info",
+        DiagnosticLevel::Warning => "Warning",
+        DiagnosticLevel::Error => "Error",
+    }
+}
+
+fn clear_list_box(list_box: &gtk::ListBox) {
+    while let Some(child) = list_box.first_child() {
+        list_box.remove(&child);
+    }
+}
+
+fn apply_color_scheme(prefer_dark_theme: bool) {
+    let style_manager = adw::StyleManager::default();
+    style_manager.set_color_scheme(if prefer_dark_theme {
+        adw::ColorScheme::PreferDark
+    } else {
+        adw::ColorScheme::Default
+    });
 }

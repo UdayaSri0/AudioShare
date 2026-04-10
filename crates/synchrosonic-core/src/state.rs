@@ -6,9 +6,9 @@ use crate::{
     diagnostics::DiagnosticEvent,
     models::{
         AudioSource, AudioSourceKind, DeviceId, DeviceStatus, DiscoveredDevice, DiscoveryEvent,
-        DiscoverySnapshot, PlaybackTarget,
+        DiscoverySnapshot, PlaybackTarget, QualityPreset,
     },
-    receiver::ReceiverSnapshot,
+    receiver::{ReceiverLatencyPreset, ReceiverServiceState, ReceiverSnapshot},
     streaming::{LocalMirrorState, StreamSessionSnapshot, StreamSessionState},
 };
 
@@ -121,6 +121,32 @@ impl AppState {
                 LocalMirrorState::Disabled
             };
         }
+    }
+
+    pub fn set_transport_quality(&mut self, quality: QualityPreset) {
+        self.config.transport.quality = quality;
+    }
+
+    pub fn set_receiver_latency_preset(&mut self, preset: ReceiverLatencyPreset) {
+        self.config.receiver.latency_preset = preset;
+        self.receiver.latency_preset = preset;
+        if self.receiver.state == ReceiverServiceState::Idle {
+            let seeded = ReceiverSnapshot::from_config(&self.config.receiver);
+            self.receiver.buffer = seeded.buffer;
+            self.receiver.sync = seeded.sync;
+        }
+    }
+
+    pub fn set_prefer_dark_theme(&mut self, prefer_dark_theme: bool) {
+        self.config.ui.prefer_dark_theme = prefer_dark_theme;
+    }
+
+    pub fn set_verbose_logging(&mut self, verbose_logging: bool) {
+        self.config.diagnostics.verbose_logging = verbose_logging;
+    }
+
+    pub fn clear_diagnostics(&mut self) {
+        self.diagnostics.clear();
     }
 
     pub fn set_playback_targets(&mut self, targets: Vec<PlaybackTarget>) {

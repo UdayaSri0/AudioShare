@@ -395,6 +395,21 @@ mod tests {
         );
     }
 
+    #[test]
+    fn sender_allows_quality_preset_changes_before_start() {
+        let mut sender =
+            LanSenderSession::new(synchrosonic_core::config::TransportConfig::default());
+
+        sender
+            .set_quality_preset(synchrosonic_core::QualityPreset::HighQuality)
+            .expect("quality preset should update");
+
+        assert_eq!(
+            sender.snapshot().state,
+            synchrosonic_core::StreamSessionState::Idle
+        );
+    }
+
     struct SpawnedReceiver {
         runtime: Arc<Mutex<ReceiverRuntime>>,
         server: LanReceiverTransportServer,

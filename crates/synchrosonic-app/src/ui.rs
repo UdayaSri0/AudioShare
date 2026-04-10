@@ -68,12 +68,7 @@ pub fn build_main_window(app: &adw::Application) {
         config.transport.heartbeat_interval_ms,
     )));
     let sender = Arc::new(Mutex::new(LanSenderSession::new(config.transport.clone())));
-    state.apply_receiver_snapshot(
-        receiver
-            .lock()
-            .expect("receiver runtime mutex")
-            .snapshot(),
-    );
+    state.apply_receiver_snapshot(receiver.lock().expect("receiver runtime mutex").snapshot());
     state.apply_streaming_snapshot(sender.lock().expect("sender session mutex").snapshot());
     let state = Rc::new(RefCell::new(state));
 
@@ -101,23 +96,25 @@ pub fn build_main_window(app: &adw::Application) {
     stack.set_hexpand(true);
     stack.set_vexpand(true);
 
-    let (dashboard, dashboard_status_label) =
-        dashboard_page(&state.borrow(), audio_backend.backend_name(), &audio_source_summary);
+    let (dashboard, dashboard_status_label) = dashboard_page(
+        &state.borrow(),
+        audio_backend.backend_name(),
+        &audio_source_summary,
+    );
     stack.add_titled(&dashboard, Some("dashboard"), "Dashboard");
     let (devices_page, devices_label) = discovery_page(&state.borrow(), &discovery_summary);
-    stack.add_titled(
-        &devices_page,
-        Some("devices"),
-        "Devices",
-    );
+    stack.add_titled(&devices_page, Some("devices"), "Devices");
     let (streaming_page, streaming_status_label, receiver_selector) = streaming_page(
         Rc::clone(&state),
         Arc::clone(&sender),
         audio_backend.clone(),
     );
     stack.add_titled(&streaming_page, Some("streaming"), "Streaming");
-    let (receiver_page, receiver_status_label) =
-        receiver_page(Rc::clone(&state), Arc::clone(&receiver), Arc::clone(&receiver_transport));
+    let (receiver_page, receiver_status_label) = receiver_page(
+        Rc::clone(&state),
+        Arc::clone(&receiver),
+        Arc::clone(&receiver_transport),
+    );
     stack.add_titled(&receiver_page, Some("receiver"), "Receiver");
     stack.add_titled(
         &status_page(
@@ -355,7 +352,10 @@ fn streaming_page(
             let enabled = toggle.is_active();
             let (result, snapshot) = {
                 let sender = sender.lock().expect("sender session mutex");
-                (sender.set_local_playback_enabled(enabled), sender.snapshot())
+                (
+                    sender.set_local_playback_enabled(enabled),
+                    sender.snapshot(),
+                )
             };
 
             let mut state = state.borrow_mut();
@@ -364,12 +364,12 @@ fn streaming_page(
 
             match result {
                 Ok(()) => {
-                    let scope = if state.streaming.state == synchrosonic_core::StreamSessionState::Idle
-                    {
-                        "next cast session"
-                    } else {
-                        "active cast session"
-                    };
+                    let scope =
+                        if state.streaming.state == synchrosonic_core::StreamSessionState::Idle {
+                            "next cast session"
+                        } else {
+                            "active cast session"
+                        };
                     state.diagnostics.push(DiagnosticEvent::info(
                         "streaming",
                         format!(
@@ -425,15 +425,17 @@ fn streaming_page(
                 return;
             };
 
-            let target = SenderTarget::new(device.id.clone(), device.display_name.clone(), endpoint);
+            let target =
+                SenderTarget::new(device.id.clone(), device.display_name.clone(), endpoint);
             let capture_settings = state.borrow().config.audio.capture_settings();
             let sender_name = state.borrow().receiver.advertised_name.clone();
 
-            match sender
-                .lock()
-                .expect("sender session mutex")
-                .start(audio_backend.clone(), capture_settings, target, sender_name)
-            {
+            match sender.lock().expect("sender session mutex").start(
+                audio_backend.clone(),
+                capture_settings,
+                target,
+                sender_name,
+            ) {
                 Ok(()) => {
                     let snapshot = sender.lock().expect("sender session mutex").snapshot();
                     let mut state = state.borrow_mut();
@@ -499,7 +501,10 @@ fn streaming_page(
                     state.apply_streaming_snapshot(snapshot);
                     state.diagnostics.push(DiagnosticEvent::info(
                         "streaming",
-                        format!("Removed receiver target {} from the active cast.", device_id),
+                        format!(
+                            "Removed receiver target {} from the active cast.",
+                            device_id
+                        ),
                     ));
                     status_label.set_text(&format_streaming_status(&state));
                 }
@@ -644,7 +649,10 @@ fn receiver_page(
         let receiver_transport = Arc::clone(&receiver_transport);
         let status_label = status_label.clone();
         stop_button.connect_clicked(move |_| {
-            let stop_transport = receiver_transport.lock().expect("receiver transport mutex").stop();
+            let stop_transport = receiver_transport
+                .lock()
+                .expect("receiver transport mutex")
+                .stop();
             let result = receiver.lock().expect("receiver runtime mutex").stop();
             match result {
                 Ok(()) => {
@@ -657,7 +665,10 @@ fn receiver_page(
                             format!("Receiver transport stop reported: {error}"),
                         ));
                     }
-                    state.diagnostics.push(DiagnosticEvent::info("receiver", "Receiver mode stopped and playback/transport resources were released."));
+                    state.diagnostics.push(DiagnosticEvent::info(
+                        "receiver",
+                        "Receiver mode stopped and playback/transport resources were released.",
+                    ));
                     status_label.set_text(&format_receiver_status(&state));
                 }
                 Err(error) => {
@@ -687,10 +698,13 @@ fn start_discovery_poll(
                 Ok(Some(event)) => state.borrow_mut().apply_discovery_event(event),
                 Ok(None) => break,
                 Err(error) => {
-                    state.borrow_mut().diagnostics.push(DiagnosticEvent::warning(
-                        "discovery",
-                        format!("mDNS discovery event error: {error}"),
-                    ));
+                    state
+                        .borrow_mut()
+                        .diagnostics
+                        .push(DiagnosticEvent::warning(
+                            "discovery",
+                            format!("mDNS discovery event error: {error}"),
+                        ));
                     break;
                 }
             }
@@ -702,10 +716,13 @@ fn start_discovery_poll(
                     state.borrow_mut().apply_discovery_event(event);
                 }
             }
-            Err(error) => state.borrow_mut().diagnostics.push(DiagnosticEvent::warning(
-                "discovery",
-                format!("mDNS stale pruning failed: {error}"),
-            )),
+            Err(error) => state
+                .borrow_mut()
+                .diagnostics
+                .push(DiagnosticEvent::warning(
+                    "discovery",
+                    format!("mDNS stale pruning failed: {error}"),
+                )),
         }
 
         state
@@ -736,6 +753,16 @@ fn start_receiver_poll(
             let mut state = state.borrow_mut();
             let state_changed = state.receiver.state != snapshot.state;
             let last_error_changed = state.receiver.last_error != snapshot.last_error;
+            let sync_state_changed = state.receiver.sync.state != snapshot.sync.state;
+            let late_drop_delta = snapshot
+                .sync
+                .late_packet_drops
+                .saturating_sub(state.receiver.sync.late_packet_drops);
+            let sync_state = snapshot.sync.state;
+            let sync_buffer_delta_ms = snapshot.sync.buffer_delta_ms;
+            let sync_schedule_error_ms = snapshot.sync.schedule_error_ms;
+            let sync_expected_latency_ms = snapshot.sync.expected_output_latency_ms;
+            let sync_queued_audio_ms = snapshot.sync.queued_audio_ms;
             let state_message = if state_changed {
                 Some(format!("Receiver state is now {:?}", snapshot.state))
             } else {
@@ -752,9 +779,34 @@ fn start_receiver_poll(
             state.apply_receiver_snapshot(snapshot);
 
             if let Some(message) = state_message {
-                state.diagnostics.push(DiagnosticEvent::info(
-                    "receiver",
-                    message,
+                state
+                    .diagnostics
+                    .push(DiagnosticEvent::info("receiver", message));
+            }
+            if sync_state_changed {
+                let sync_event = match sync_state {
+                    synchrosonic_core::ReceiverSyncState::Late
+                    | synchrosonic_core::ReceiverSyncState::Recovering => DiagnosticEvent::warning(
+                        "receiver-sync",
+                        format!(
+                            "Receiver sync is now {:?} (buffer delta {} ms, schedule error {} ms).",
+                            sync_state, sync_buffer_delta_ms, sync_schedule_error_ms
+                        ),
+                    ),
+                    _ => DiagnosticEvent::info(
+                        "receiver-sync",
+                        format!(
+                            "Receiver sync is now {:?} (expected {} ms, queued {} ms).",
+                            sync_state, sync_expected_latency_ms, sync_queued_audio_ms
+                        ),
+                    ),
+                };
+                state.diagnostics.push(sync_event);
+            }
+            if late_drop_delta > 0 {
+                state.diagnostics.push(DiagnosticEvent::warning(
+                    "receiver-sync",
+                    format!("Receiver dropped {late_drop_delta} stale packet(s) to recover sync."),
                 ));
             }
             if let Some(message) = error_message {
@@ -763,10 +815,7 @@ fn start_receiver_poll(
                     .push(DiagnosticEvent::warning("receiver", message));
             }
             if let Some(error) = &transport_snapshot.last_error {
-                if state
-                    .diagnostics
-                    .last()
-                    .map(|event| event.message.as_str())
+                if state.diagnostics.last().map(|event| event.message.as_str())
                     != Some(error.as_str())
                 {
                     state.diagnostics.push(DiagnosticEvent::warning(
@@ -824,13 +873,16 @@ fn start_streaming_poll(
         };
         let local_mirror_error_message =
             if previous_snapshot.local_mirror.last_error != snapshot.local_mirror.last_error {
-                snapshot.local_mirror.last_error.as_ref().map(|error| {
-                    format!("Local playback mirror reported: {error}")
-                })
+                snapshot
+                    .local_mirror
+                    .last_error
+                    .as_ref()
+                    .map(|error| format!("Local playback mirror reported: {error}"))
             } else {
                 None
             };
-        let target_messages = stream_target_transition_messages(&previous_snapshot.targets, &snapshot.targets);
+        let target_messages =
+            stream_target_transition_messages(&previous_snapshot.targets, &snapshot.targets);
 
         {
             let mut state = state.borrow_mut();
@@ -1084,8 +1136,7 @@ fn stream_target_transition_messages(
                 ),
             )),
             Some(previous_target) => {
-                if previous_target.state != target.state
-                    || previous_target.health != target.health
+                if previous_target.state != target.state || previous_target.health != target.health
                 {
                     messages.push(DiagnosticEvent::info(
                         "streaming",
@@ -1162,9 +1213,12 @@ fn find_receiver_device(state: &AppState, device_id: &str) -> Option<DiscoveredD
 }
 
 fn receiver_bind_addr(config: &AppConfig) -> SocketAddr {
-    format!("{}:{}", config.receiver.bind_host, config.receiver.listen_port)
-        .parse()
-        .unwrap_or_else(|_| SocketAddr::from(([0, 0, 0, 0], config.receiver.listen_port)))
+    format!(
+        "{}:{}",
+        config.receiver.bind_host, config.receiver.listen_port
+    )
+    .parse()
+    .unwrap_or_else(|_| SocketAddr::from(([0, 0, 0, 0], config.receiver.listen_port)))
 }
 
 fn format_receiver_status(state: &AppState) -> String {
@@ -1174,7 +1228,7 @@ fn format_receiver_status(state: &AppState) -> String {
         .as_ref()
         .map(|connection| {
             format!(
-                "session={} remote={} stream={}Hz/{}ch/{:?}/{}fpp",
+                "session={} remote={} stream={}Hz/{}ch/{:?}/{}fpp requested={}ms",
                 connection.session_id,
                 connection
                     .remote_addr
@@ -1183,17 +1237,15 @@ fn format_receiver_status(state: &AppState) -> String {
                 connection.stream.sample_rate_hz,
                 connection.stream.channels,
                 connection.stream.sample_format,
-                connection.stream.frames_per_packet
+                connection.stream.frames_per_packet,
+                connection.requested_latency_ms
             )
         })
         .unwrap_or_else(|| "none".to_string());
-    let last_error = receiver
-        .last_error
-        .as_deref()
-        .unwrap_or("none");
+    let last_error = receiver.last_error.as_deref().unwrap_or("none");
 
     format!(
-        "State: {:?}\nAdvertised name: {}\nListen address: {}:{}\nLatency preset: {:?}\nPlayback backend: {}\nPlayback target: {}\nConnection: {}\nBuffer: {} packet(s), {} frame(s), {}% full\nMetrics: packets in={} frames in={} bytes in={} packets out={} frames out={} bytes out={} underruns={} overruns={} reconnect attempts={}\nLast error: {}\nInternal app flow: use the Start/Stop buttons here; the TCP receiver listener already submits Connected, AudioPacket, KeepAlive, and Disconnected events into the runtime.",
+        "State: {:?}\nAdvertised name: {}\nListen address: {}:{}\nLatency preset: {:?}\nPlayback backend: {}\nPlayback target: {}\nConnection: {}\nBuffer: {} packet(s), {} frame(s), {} ms queued, target {} ms, max {} ms, {}% full\nSync: state={:?} expected={} ms requested={} queued={} ms buffer delta={} ms schedule error={} ms late drops={} resets={} last sender ts={} last sender unix={}\nMetrics: packets in={} frames in={} bytes in={} packets out={} frames out={} bytes out={} underruns={} overruns={} reconnect attempts={}\nLast error: {}\nInternal app flow: use the Start/Stop buttons here; the TCP receiver listener already submits Connected, AudioPacket, KeepAlive, and Disconnected events into the runtime.",
         receiver.state,
         receiver.advertised_name,
         receiver.bind_host,
@@ -1210,7 +1262,32 @@ fn format_receiver_status(state: &AppState) -> String {
         connection,
         receiver.buffer.queued_packets,
         receiver.buffer.queued_frames,
+        receiver.buffer.queued_audio_ms,
+        receiver.buffer.target_buffer_ms,
+        receiver.buffer.max_buffer_ms,
         receiver.buffer.fill_percent(),
+        receiver.sync.state,
+        receiver.sync.expected_output_latency_ms,
+        receiver
+            .sync
+            .requested_latency_ms
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "none".to_string()),
+        receiver.sync.queued_audio_ms,
+        receiver.sync.buffer_delta_ms,
+        receiver.sync.schedule_error_ms,
+        receiver.sync.late_packet_drops,
+        receiver.sync.sync_resets,
+        receiver
+            .sync
+            .last_sender_timestamp_ms
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "none".to_string()),
+        receiver
+            .sync
+            .last_sender_capture_unix_ms
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "none".to_string()),
         receiver.metrics.packets_received,
         receiver.metrics.frames_received,
         receiver.metrics.bytes_received,

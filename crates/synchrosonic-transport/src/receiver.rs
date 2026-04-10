@@ -83,10 +83,11 @@ impl LanReceiverTransportServer {
             return Ok(());
         }
 
-        let listener = TcpListener::bind(self.bind_addr).map_err(|source| TransportError::Bind {
-            address: self.bind_addr.to_string(),
-            source,
-        })?;
+        let listener =
+            TcpListener::bind(self.bind_addr).map_err(|source| TransportError::Bind {
+                address: self.bind_addr.to_string(),
+                source,
+            })?;
         let bound_addr = listener.local_addr().map_err(|source| TransportError::Io {
             context: "reading receiver listener local address".to_string(),
             source,
@@ -132,7 +133,9 @@ impl LanReceiverTransportServer {
 
     pub fn stop(&mut self) -> Result<(), TransportError> {
         if let Some(stop_tx) = self.stop_tx.take() {
-            stop_tx.send(()).map_err(|_| TransportError::ChannelClosed)?;
+            stop_tx
+                .send(())
+                .map_err(|_| TransportError::ChannelClosed)?;
         }
 
         if let Ok(mut stream_slot) = self.active_stream.lock() {
@@ -214,7 +217,14 @@ fn receiver_listener_loop(
             }
             Err(source) => {
                 let error = TransportError::Io {
-                    context: format!("accepting connection on {}", listener.local_addr().ok().map(|addr| addr.to_string()).unwrap_or_else(|| "receiver-listener".to_string())),
+                    context: format!(
+                        "accepting connection on {}",
+                        listener
+                            .local_addr()
+                            .ok()
+                            .map(|addr| addr.to_string())
+                            .unwrap_or_else(|| "receiver-listener".to_string())
+                    ),
                     source,
                 };
                 tracing::error!(error = %error, "receiver listener failed");
@@ -258,11 +268,7 @@ fn handle_receiver_session(
 
     let frame = read_frame(&mut stream)?;
     if frame.kind != FrameKind::Hello {
-        send_protocol_error(
-            &mut stream,
-            "unexpected-frame",
-            "first frame must be Hello",
-        )?;
+        send_protocol_error(&mut stream, "unexpected-frame", "first frame must be Hello")?;
         return Err(TransportError::InvalidProtocol(
             "receiver expected Hello as the first frame".to_string(),
         ));
@@ -278,7 +284,7 @@ fn handle_receiver_session(
         codec: hello.desired_codec,
         stream: hello.stream.clone(),
         keepalive_interval_ms,
-        receiver_latency_ms: latency_preset.profile().playback_latency_ms,
+        receiver_latency_ms: latency_preset.profile().expected_output_latency_ms(),
     };
     write_message(&mut stream, FrameKind::Accept, &accept, &[])?;
 
@@ -286,6 +292,7 @@ fn handle_receiver_session(
         session_id: hello.session_id.clone(),
         remote_addr: Some(peer_addr),
         stream: hello.stream.clone(),
+        requested_latency_ms: hello.target_latency_ms,
     }))
     .map_err(|error| TransportError::ReceiverCallback(error.to_string()))?;
 
@@ -332,6 +339,7 @@ fn handle_receiver_session(
                         synchrosonic_core::ReceiverAudioPacket {
                             sequence: metadata.sequence,
                             captured_at_ms: metadata.captured_at_ms,
+                            captured_at_unix_ms: metadata.captured_at_unix_ms,
                             payload: frame.payload,
                         },
                     ))
@@ -364,7 +372,10 @@ fn handle_receiver_session(
                     send_protocol_error(
                         &mut stream,
                         "unexpected-frame",
-                        &format!("receiver does not accept {:?} during active streaming", unexpected),
+                        &format!(
+                            "receiver does not accept {:?} during active streaming",
+                            unexpected
+                        ),
                     )?;
                     return Err(TransportError::InvalidProtocol(format!(
                         "unexpected {:?} frame during active streaming",
@@ -373,7 +384,10 @@ fn handle_receiver_session(
                 }
             },
             Err(TransportError::Io { source, .. })
-                if matches!(source.kind(), ErrorKind::UnexpectedEof | ErrorKind::ConnectionReset) =>
+                if matches!(
+                    source.kind(),
+                    ErrorKind::UnexpectedEof | ErrorKind::ConnectionReset
+                ) =>
             {
                 (on_event)(ReceiverTransportEvent::Disconnected {
                     reason: "sender disconnected unexpectedly".to_string(),
@@ -391,11 +405,7 @@ fn handle_receiver_session(
                 let _ = (on_event)(ReceiverTransportEvent::Error {
                     message: error.to_string(),
                 });
-                let _ = send_protocol_error(
-                    &mut stream,
-                    "read-failure",
-                    &error.to_string(),
-                );
+                let _ = send_protocol_error(&mut stream, "read-failure", &error.to_string());
                 return Err(error);
             }
         }

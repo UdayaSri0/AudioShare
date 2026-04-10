@@ -17,6 +17,7 @@ const LOCAL_MIRROR_IDLE_POLL_INTERVAL: Duration = Duration::from_millis(5);
 pub struct FanoutAudioFrame {
     pub sequence: u64,
     pub captured_at_ms: u64,
+    pub captured_at_unix_ms: u64,
     pub payload: Vec<u8>,
 }
 
@@ -131,7 +132,10 @@ impl LocalMirrorBranch {
         }
     }
 
-    pub fn push_frame(&self, frame: FanoutAudioFrame) -> Result<BufferedPushOutcome, TransportError> {
+    pub fn push_frame(
+        &self,
+        frame: FanoutAudioFrame,
+    ) -> Result<BufferedPushOutcome, TransportError> {
         self.queue.push(frame)
     }
 
@@ -219,7 +223,8 @@ fn local_mirror_worker_loop(
                             let _ = event_tx.send(LocalMirrorEvent::Error(error.to_string()));
                         }
                     }
-                    let _ = event_tx.send(LocalMirrorEvent::StateChanged(LocalMirrorState::Disabled));
+                    let _ =
+                        event_tx.send(LocalMirrorEvent::StateChanged(LocalMirrorState::Disabled));
                 }
                 LocalMirrorControl::Shutdown => {
                     if let Some(mut active_sink) = sink.take() {
@@ -232,34 +237,32 @@ fn local_mirror_worker_loop(
 
         if !enabled {
             match control_rx.recv_timeout(LOCAL_MIRROR_IDLE_POLL_INTERVAL) {
-                Ok(control) => {
-                    match control {
-                        LocalMirrorControl::Start(request) => {
-                            match playback_engine.start_stream(request.clone()) {
-                                Ok(new_sink) => {
-                                    sink = Some(new_sink);
-                                    enabled = true;
-                                    let _ = event_tx.send(LocalMirrorEvent::Started {
-                                        backend_name: backend_name.clone(),
-                                        target_id: request.target_id.clone(),
-                                    });
-                                    let _ = event_tx.send(LocalMirrorEvent::StateChanged(
-                                        LocalMirrorState::Mirroring,
-                                    ));
-                                }
-                                Err(error) => {
-                                    clear_stale_frames(&frame_rx);
-                                    let _ = event_tx.send(LocalMirrorEvent::Error(error.to_string()));
-                                }
+                Ok(control) => match control {
+                    LocalMirrorControl::Start(request) => {
+                        match playback_engine.start_stream(request.clone()) {
+                            Ok(new_sink) => {
+                                sink = Some(new_sink);
+                                enabled = true;
+                                let _ = event_tx.send(LocalMirrorEvent::Started {
+                                    backend_name: backend_name.clone(),
+                                    target_id: request.target_id.clone(),
+                                });
+                                let _ = event_tx.send(LocalMirrorEvent::StateChanged(
+                                    LocalMirrorState::Mirroring,
+                                ));
+                            }
+                            Err(error) => {
+                                clear_stale_frames(&frame_rx);
+                                let _ = event_tx.send(LocalMirrorEvent::Error(error.to_string()));
                             }
                         }
-                        LocalMirrorControl::Stop => {
-                            let _ =
-                                event_tx.send(LocalMirrorEvent::StateChanged(LocalMirrorState::Disabled));
-                        }
-                        LocalMirrorControl::Shutdown => return,
                     }
-                }
+                    LocalMirrorControl::Stop => {
+                        let _ = event_tx
+                            .send(LocalMirrorEvent::StateChanged(LocalMirrorState::Disabled));
+                    }
+                    LocalMirrorControl::Shutdown => return,
+                },
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => return,
             }
@@ -317,6 +320,7 @@ mod tests {
                 .push(FanoutAudioFrame {
                     sequence: 1,
                     captured_at_ms: 1,
+                    captured_at_unix_ms: 1_001,
                     payload: vec![1],
                 })
                 .expect("first frame should enqueue"),
@@ -327,6 +331,7 @@ mod tests {
                 .push(FanoutAudioFrame {
                     sequence: 2,
                     captured_at_ms: 2,
+                    captured_at_unix_ms: 1_002,
                     payload: vec![2],
                 })
                 .expect("second frame should enqueue"),
@@ -337,6 +342,7 @@ mod tests {
                 .push(FanoutAudioFrame {
                     sequence: 3,
                     captured_at_ms: 3,
+                    captured_at_unix_ms: 1_003,
                     payload: vec![3],
                 })
                 .expect("full queue should drop the oldest frame"),

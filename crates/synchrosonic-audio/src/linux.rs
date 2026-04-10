@@ -51,7 +51,10 @@ impl AudioBackend for LinuxAudioBackend {
     }
 
     fn list_sources(&self) -> Result<Vec<AudioSource>, AudioError> {
-        tracing::info!(backend = self.backend_name(), "enumerating PipeWire audio sources");
+        tracing::info!(
+            backend = self.backend_name(),
+            "enumerating PipeWire audio sources"
+        );
         let dump = self.pipewire_dump()?;
         parse_pipewire_sources(&dump)
     }
@@ -341,8 +344,7 @@ fn capture_stdout_loop(
             }
             Ok(bytes_read) => {
                 payload.truncate(bytes_read);
-                let frame =
-                    AudioFrame::from_payload(sequence, start.elapsed(), &settings, payload);
+                let frame = AudioFrame::from_payload(sequence, start.elapsed(), &settings, payload);
 
                 if let Ok(mut stats) = stats.lock() {
                     stats.frames_emitted += 1;
@@ -531,8 +533,7 @@ fn default_node_name(objects: &[Value], key: &str) -> Option<String> {
         .iter()
         .filter(|object| object_type(object) == Some("PipeWire:Interface:Metadata"))
         .filter(|object| {
-            object_props(object)
-                .and_then(|props| prop_str(props, "metadata.name"))
+            object_props(object).and_then(|props| prop_str(props, "metadata.name"))
                 == Some("default")
         })
         .flat_map(|object| {

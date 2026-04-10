@@ -94,7 +94,11 @@ impl AppState {
 
     pub fn select_audio_source(&mut self, source_id: impl Into<String>) -> bool {
         let source_id = source_id.into();
-        if !self.audio_sources.iter().any(|source| source.id == source_id) {
+        if !self
+            .audio_sources
+            .iter()
+            .any(|source| source.id == source_id)
+        {
             return false;
         }
 
@@ -238,7 +242,10 @@ mod tests {
 
         assert_eq!(state.cast_session, CastSessionState::Idle);
         assert_eq!(state.capture_state, CaptureState::Idle);
-        assert_eq!(state.receiver.state, crate::receiver::ReceiverServiceState::Idle);
+        assert_eq!(
+            state.receiver.state,
+            crate::receiver::ReceiverServiceState::Idle
+        );
         assert_eq!(state.streaming.state, StreamSessionState::Idle);
         assert!(state.streaming.local_mirror.desired_enabled);
         assert_eq!(state.streaming.local_mirror.state, LocalMirrorState::Idle);
@@ -266,7 +273,10 @@ mod tests {
         ]);
 
         assert_eq!(state.selected_audio_source_id.as_deref(), Some("speaker"));
-        assert_eq!(state.config.audio.preferred_source_id.as_deref(), Some("speaker"));
+        assert_eq!(
+            state.config.audio.preferred_source_id.as_deref(),
+            Some("speaker")
+        );
     }
 
     #[test]
@@ -276,7 +286,10 @@ mod tests {
         state.set_local_playback_enabled(false);
         assert!(!state.config.audio.local_playback_enabled);
         assert!(!state.streaming.local_mirror.desired_enabled);
-        assert_eq!(state.streaming.local_mirror.state, LocalMirrorState::Disabled);
+        assert_eq!(
+            state.streaming.local_mirror.state,
+            LocalMirrorState::Disabled
+        );
 
         state.set_local_playback_enabled(true);
         assert!(state.config.audio.local_playback_enabled);

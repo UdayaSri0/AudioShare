@@ -23,11 +23,11 @@ pub use models::{
 pub use receiver::{
     ReceiverAudioPacket, ReceiverBufferSnapshot, ReceiverConnectionInfo, ReceiverLatencyPreset,
     ReceiverLatencyProfile, ReceiverMetrics, ReceiverServiceState, ReceiverSnapshot,
-    ReceiverStreamConfig, ReceiverTransportEvent,
+    ReceiverStreamConfig, ReceiverSyncSnapshot, ReceiverSyncState, ReceiverTransportEvent,
 };
 pub use state::{AppState, CastSessionState};
 pub use streaming::{
-    LocalMirrorSnapshot, LocalMirrorState, StreamBranchBufferSnapshot, StreamCodec,
-    StreamMetrics, StreamSessionSnapshot, StreamSessionState, StreamTargetHealth,
-    StreamTargetSnapshot, STREAM_PROTOCOL_VERSION,
+    LocalMirrorSnapshot, LocalMirrorState, StreamBranchBufferSnapshot, StreamCodec, StreamMetrics,
+    StreamSessionSnapshot, StreamSessionState, StreamTargetHealth, StreamTargetSnapshot,
+    STREAM_PROTOCOL_VERSION,
 };

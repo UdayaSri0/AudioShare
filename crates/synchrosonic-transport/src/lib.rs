@@ -20,8 +20,8 @@ mod tests {
     use synchrosonic_audio::{PlaybackEngine, PlaybackSink, PlaybackStartRequest};
     use synchrosonic_core::{
         services::{AudioBackend, AudioCapture, ReceiverService},
-        AudioError, AudioFrame, AudioSource, CaptureSettings, CaptureStats,
-        PlaybackTarget, ReceiverError, ReceiverTransportEvent,
+        AudioError, AudioFrame, AudioSource, CaptureSettings, CaptureStats, PlaybackTarget,
+        ReceiverError, ReceiverTransportEvent,
     };
     use synchrosonic_receiver::ReceiverRuntime;
 
@@ -52,7 +52,8 @@ mod tests {
 
     impl PlaybackSink for MockPlaybackSink {
         fn write(&mut self, payload: &[u8]) -> Result<(), AudioError> {
-            self.bytes_written.fetch_add(payload.len(), Ordering::SeqCst);
+            self.bytes_written
+                .fetch_add(payload.len(), Ordering::SeqCst);
             Ok(())
         }
 
@@ -97,8 +98,7 @@ mod tests {
 
     impl AudioCapture for MockCapture {
         fn recv_frame(&mut self) -> Result<AudioFrame, AudioError> {
-            self.try_recv_frame()?
-                .ok_or(AudioError::CaptureEnded)
+            self.try_recv_frame()?.ok_or(AudioError::CaptureEnded)
         }
 
         fn try_recv_frame(&mut self) -> Result<Option<AudioFrame>, AudioError> {
@@ -232,7 +232,10 @@ mod tests {
             .expect("receiver runtime mutex")
             .snapshot();
 
-        assert_eq!(sender_snapshot.state, synchrosonic_core::StreamSessionState::Streaming);
+        assert_eq!(
+            sender_snapshot.state,
+            synchrosonic_core::StreamSessionState::Streaming
+        );
         assert!(sender_snapshot.metrics.packets_sent >= 4);
         assert!(sender_snapshot.local_mirror.packets_played >= 4);
         assert!(receiver_snapshot.metrics.packets_received >= 4);
@@ -323,7 +326,10 @@ mod tests {
         thread::sleep(Duration::from_millis(200));
 
         let snapshot = sender.snapshot();
-        assert_eq!(snapshot.state, synchrosonic_core::StreamSessionState::Streaming);
+        assert_eq!(
+            snapshot.state,
+            synchrosonic_core::StreamSessionState::Streaming
+        );
         assert_eq!(snapshot.targets.len(), 2);
         assert!(snapshot
             .targets
@@ -339,7 +345,10 @@ mod tests {
         thread::sleep(Duration::from_millis(150));
 
         let snapshot_after = sender.snapshot();
-        assert_eq!(snapshot_after.state, synchrosonic_core::StreamSessionState::Streaming);
+        assert_eq!(
+            snapshot_after.state,
+            synchrosonic_core::StreamSessionState::Streaming
+        );
         assert_eq!(snapshot_after.targets.len(), 1);
         assert_eq!(snapshot_after.targets[0].receiver_id.as_str(), "receiver-2");
         assert!(receiver_two_bytes.load(Ordering::SeqCst) > receiver_two_before);
@@ -411,11 +420,11 @@ mod tests {
         {
             let runtime_for_events = Arc::clone(&runtime);
             match server.start(move |event: ReceiverTransportEvent| {
-                    runtime_for_events
-                        .lock()
-                        .map_err(|_| ReceiverError::ThreadJoin)?
-                        .submit_transport_event(event)
-                }) {
+                runtime_for_events
+                    .lock()
+                    .map_err(|_| ReceiverError::ThreadJoin)?
+                    .submit_transport_event(event)
+            }) {
                 Ok(()) => {}
                 Err(synchrosonic_core::TransportError::Bind { source, .. })
                     if source.kind() == std::io::ErrorKind::PermissionDenied =>

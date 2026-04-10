@@ -228,4 +228,3 @@ mod tests {
         assert!(stats.rms_amplitude > 0.8);
     }
 }
-

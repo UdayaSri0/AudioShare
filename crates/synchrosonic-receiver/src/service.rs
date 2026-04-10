@@ -6,10 +6,9 @@ use std::{
 
 use flume::{Receiver, RecvTimeoutError, Sender};
 use synchrosonic_core::{
-    config::ReceiverConfig,
-    services::ReceiverService,
-    ReceiverError, ReceiverLatencyProfile, ReceiverMetrics, ReceiverServiceState,
-    ReceiverSnapshot, ReceiverTransportEvent,
+    config::ReceiverConfig, services::ReceiverService, ReceiverConnectionInfo, ReceiverError,
+    ReceiverLatencyProfile, ReceiverMetrics, ReceiverServiceState, ReceiverSnapshot,
+    ReceiverStreamConfig, ReceiverSyncSnapshot, ReceiverSyncState, ReceiverTransportEvent,
 };
 
 use crate::{
@@ -139,6 +138,27 @@ enum ReceiverCommand {
     Shutdown,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct SyncClock {
+    anchor_local_instant: Instant,
+    anchor_sender_timestamp_ms: u64,
+}
+
+impl SyncClock {
+    fn new(anchor_local_instant: Instant, anchor_sender_timestamp_ms: u64) -> Self {
+        Self {
+            anchor_local_instant,
+            anchor_sender_timestamp_ms,
+        }
+    }
+
+    fn write_deadline(&self, sender_timestamp_ms: u64, target_buffer_ms: u16) -> Instant {
+        let sender_offset_ms = sender_timestamp_ms.saturating_sub(self.anchor_sender_timestamp_ms);
+        self.anchor_local_instant
+            + Duration::from_millis(sender_offset_ms.saturating_add(target_buffer_ms as u64))
+    }
+}
+
 struct ReceiverWorker {
     config: ReceiverConfig,
     playback_engine: Arc<dyn PlaybackEngine>,
@@ -147,7 +167,9 @@ struct ReceiverWorker {
     buffer_profile: ReceiverLatencyProfile,
     snapshot: Arc<Mutex<ReceiverSnapshot>>,
     metrics: ReceiverMetrics,
-    connection: Option<synchrosonic_core::ReceiverConnectionInfo>,
+    sync: ReceiverSyncSnapshot,
+    sync_clock: Option<SyncClock>,
+    connection: Option<ReceiverConnectionInfo>,
     state: ReceiverServiceState,
     next_playback_deadline: Option<Instant>,
     last_transport_activity: Option<Instant>,
@@ -161,7 +183,7 @@ impl ReceiverWorker {
         snapshot: Arc<Mutex<ReceiverSnapshot>>,
     ) -> Self {
         let buffer_profile = config.latency_preset.profile();
-        let buffer = ReceiverPacketBuffer::new(buffer_profile);
+        let buffer = ReceiverPacketBuffer::new(buffer_profile, &ReceiverStreamConfig::default());
 
         let worker = Self {
             config,
@@ -171,6 +193,8 @@ impl ReceiverWorker {
             buffer_profile,
             snapshot,
             metrics: ReceiverMetrics::default(),
+            sync: ReceiverSyncSnapshot::from_profile(buffer_profile),
+            sync_clock: None,
             connection: None,
             state: ReceiverServiceState::Listening,
             next_playback_deadline: None,
@@ -206,10 +230,13 @@ impl ReceiverWorker {
         self.sync_snapshot();
     }
 
-    fn handle_connect(&mut self, connection: synchrosonic_core::ReceiverConnectionInfo) {
+    fn handle_connect(&mut self, connection: ReceiverConnectionInfo) {
         self.stop_playback_sink();
-        self.buffer.clear();
-        self.next_playback_deadline = None;
+        self.buffer = ReceiverPacketBuffer::new(self.buffer_profile, &connection.stream);
+        self.reset_sync_timeline(false);
+        self.sync = ReceiverSyncSnapshot::from_profile(self.buffer_profile);
+        self.sync.state = ReceiverSyncState::Priming;
+        self.sync.requested_latency_ms = Some(connection.requested_latency_ms);
 
         let request = PlaybackStartRequest {
             stream: connection.stream.clone(),
@@ -249,6 +276,13 @@ impl ReceiverWorker {
             return;
         };
 
+        let received_at = Instant::now();
+        if self.sync_clock.is_none() {
+            self.sync_clock = Some(SyncClock::new(received_at, packet.captured_at_ms));
+        }
+        self.sync.last_sender_timestamp_ms = Some(packet.captured_at_ms);
+        self.sync.last_sender_capture_unix_ms = Some(packet.captured_at_unix_ms);
+
         let frame_count = match packet.frame_count(&connection.stream) {
             Ok(frame_count) => frame_count,
             Err(error) => {
@@ -274,16 +308,35 @@ impl ReceiverWorker {
                 self.metrics.frames_received += frame_count as u64;
                 self.metrics.bytes_received += payload_len;
                 self.metrics.buffer_fill_percent = snapshot.fill_percent();
-                self.last_transport_activity = Some(Instant::now());
+                self.last_transport_activity = Some(received_at);
+                self.refresh_sync_buffer_metrics();
 
                 if self.buffer.is_ready() {
                     if self.state != ReceiverServiceState::Playing {
                         self.state = ReceiverServiceState::Buffering;
                     }
-                    self.next_playback_deadline
-                        .get_or_insert_with(Instant::now);
-                } else if self.state == ReceiverServiceState::Connected {
+                    if self.next_playback_deadline.is_none() {
+                        self.next_playback_deadline = self
+                            .buffer
+                            .front()
+                            .and_then(|front| self.write_deadline_for(front.packet.captured_at_ms));
+                    }
+                    if matches!(
+                        self.sync.state,
+                        ReceiverSyncState::Idle
+                            | ReceiverSyncState::Priming
+                            | ReceiverSyncState::Recovering
+                    ) {
+                        self.sync.state = ReceiverSyncState::Priming;
+                    }
+                } else if matches!(
+                    self.state,
+                    ReceiverServiceState::Connected | ReceiverServiceState::Buffering
+                ) {
                     self.state = ReceiverServiceState::Buffering;
+                    if self.sync.state != ReceiverSyncState::Recovering {
+                        self.sync.state = ReceiverSyncState::Priming;
+                    }
                 }
 
                 tracing::debug!(
@@ -303,38 +356,98 @@ impl ReceiverWorker {
     fn on_tick(&mut self) {
         self.drain_ready_packets();
         self.check_transport_timeout();
+        self.refresh_sync_buffer_metrics();
         self.sync_snapshot();
     }
 
     fn drain_ready_packets(&mut self) {
-        let Some(connection) = &self.connection else {
+        if self.connection.is_none() {
             return;
-        };
+        }
 
-        let packet_duration = connection.stream.packet_duration();
-        let packet_duration = if packet_duration.is_zero() {
-            Duration::from_millis(10)
-        } else {
-            packet_duration
-        };
-
-        while let Some(deadline) = self.next_playback_deadline {
-            if Instant::now() < deadline {
-                break;
-            }
-
-            let Some(packet) = self.buffer.pop() else {
-                self.metrics.underruns += 1;
+        if self.sync_clock.is_none() {
+            if self.state == ReceiverServiceState::Connected {
                 self.state = ReceiverServiceState::Buffering;
-                self.metrics.buffer_fill_percent = self.buffer.snapshot().fill_percent();
-                self.next_playback_deadline = None;
-                tracing::warn!(
-                    underruns = self.metrics.underruns,
-                    "receiver playback buffer underrun"
-                );
+            }
+            return;
+        }
+
+        if self.next_playback_deadline.is_none() && !self.buffer.is_ready() {
+            if self.state != ReceiverServiceState::Playing {
+                self.state = ReceiverServiceState::Buffering;
+            }
+            if self.sync.state != ReceiverSyncState::Recovering {
+                self.sync.state = ReceiverSyncState::Priming;
+            }
+            self.sync.schedule_error_ms = 0;
+            return;
+        }
+
+        // The receiver uses the sender's capture timestamp as the media clock and anchors it
+        // to the local `Instant` when the first packet of the current sync window arrives.
+        // Every queued packet is then written to the playback process when its sender-side
+        // media time plus the target jitter buffer becomes due locally.
+        loop {
+            let Some(front) = self.buffer.front() else {
+                if self.state == ReceiverServiceState::Playing {
+                    self.metrics.underruns += 1;
+                    self.state = ReceiverServiceState::Buffering;
+                    self.metrics.buffer_fill_percent = self.buffer.snapshot().fill_percent();
+                    self.reset_sync_timeline(true);
+                    self.sync.state = ReceiverSyncState::Recovering;
+                    tracing::warn!(
+                        underruns = self.metrics.underruns,
+                        "receiver playback buffer underrun"
+                    );
+                }
                 break;
             };
 
+            let Some(deadline) = self.write_deadline_for(front.packet.captured_at_ms) else {
+                break;
+            };
+            self.next_playback_deadline = Some(deadline);
+
+            let now = Instant::now();
+            let schedule_error_ms = signed_instant_delta_ms(now, deadline);
+            self.sync.schedule_error_ms = schedule_error_ms;
+
+            if schedule_error_ms > self.buffer_profile.late_packet_drop_ms as i32 {
+                let dropped = self
+                    .buffer
+                    .pop()
+                    .expect("buffer.front() already ensured a packet is available");
+                self.sync.late_packet_drops += 1;
+                self.sync.state = ReceiverSyncState::Late;
+                self.metrics.buffer_fill_percent = self.buffer.snapshot().fill_percent();
+                self.refresh_sync_buffer_metrics();
+                tracing::warn!(
+                    sequence = dropped.packet.sequence,
+                    lateness_ms = schedule_error_ms,
+                    late_packet_drops = self.sync.late_packet_drops,
+                    "receiver dropped a stale packet to recover sync"
+                );
+
+                if self.buffer.front().is_none() {
+                    self.reset_sync_timeline(true);
+                    self.sync.state = ReceiverSyncState::Recovering;
+                    break;
+                }
+
+                continue;
+            }
+
+            if now < deadline {
+                if self.state != ReceiverServiceState::Playing {
+                    self.state = ReceiverServiceState::Buffering;
+                }
+                break;
+            }
+
+            let packet = self
+                .buffer
+                .pop()
+                .expect("buffer.front() already ensured a packet is available");
             let Some(playback_sink) = self.playback_sink.as_mut() else {
                 self.set_error("playback sink disappeared during active stream".to_string());
                 return;
@@ -350,14 +463,46 @@ impl ReceiverWorker {
             self.metrics.bytes_played += packet.packet.payload.len() as u64;
             self.metrics.buffer_fill_percent = self.buffer.snapshot().fill_percent();
             self.state = ReceiverServiceState::Playing;
-            self.next_playback_deadline = Some(deadline + packet_duration);
+            self.sync.state = if schedule_error_ms > self.buffer_profile.latency_tolerance_ms as i32
+            {
+                ReceiverSyncState::Late
+            } else {
+                ReceiverSyncState::Locked
+            };
+            self.next_playback_deadline = None;
+            self.refresh_sync_buffer_metrics();
 
             tracing::debug!(
                 packets_played = self.metrics.packets_played,
                 frames_played = self.metrics.frames_played,
                 buffer_fill = self.metrics.buffer_fill_percent,
-                "receiver played buffered packet"
+                schedule_error_ms,
+                "receiver played a packet against the sender media clock"
             );
+        }
+    }
+
+    fn write_deadline_for(&self, sender_timestamp_ms: u64) -> Option<Instant> {
+        self.sync_clock.as_ref().map(|clock| {
+            clock.write_deadline(sender_timestamp_ms, self.buffer_profile.target_buffer_ms)
+        })
+    }
+
+    fn refresh_sync_buffer_metrics(&mut self) {
+        let snapshot = self.buffer.snapshot();
+        self.sync.queued_audio_ms = snapshot.queued_audio_ms;
+        self.sync.buffer_delta_ms =
+            snapshot.queued_audio_ms as i32 - self.sync.target_buffer_ms as i32;
+    }
+
+    fn reset_sync_timeline(&mut self, count_reset: bool) {
+        self.sync_clock = None;
+        self.next_playback_deadline = None;
+        self.sync.schedule_error_ms = 0;
+        self.sync.last_sender_timestamp_ms = None;
+        self.sync.last_sender_capture_unix_ms = None;
+        if count_reset {
+            self.sync.sync_resets += 1;
         }
     }
 
@@ -388,7 +533,8 @@ impl ReceiverWorker {
         self.stop_playback_sink();
         self.connection = None;
         self.buffer.clear();
-        self.next_playback_deadline = None;
+        self.reset_sync_timeline(false);
+        self.sync = ReceiverSyncSnapshot::from_profile(self.buffer_profile);
         self.last_transport_activity = None;
         self.state = ReceiverServiceState::Listening;
         self.metrics.buffer_fill_percent = 0;
@@ -404,11 +550,13 @@ impl ReceiverWorker {
         self.stop_playback_sink();
         self.connection = None;
         self.buffer.clear();
-        self.next_playback_deadline = None;
+        self.reset_sync_timeline(false);
+        self.sync = ReceiverSyncSnapshot::from_profile(self.buffer_profile);
         self.last_transport_activity = None;
         self.state = ReceiverServiceState::Error;
         self.last_error = Some(message);
         self.metrics.buffer_fill_percent = 0;
+        self.sync.state = ReceiverSyncState::Recovering;
     }
 
     fn stop_playback_sink(&mut self) {
@@ -444,6 +592,7 @@ impl ReceiverWorker {
             snapshot.state = self.state;
             snapshot.connection = self.connection.clone();
             snapshot.buffer = buffer;
+            snapshot.sync = self.sync.clone();
             snapshot.metrics = ReceiverMetrics {
                 buffer_fill_percent: buffer.fill_percent(),
                 ..self.metrics
@@ -458,7 +607,17 @@ impl ReceiverWorker {
         self.connection = None;
         self.state = ReceiverServiceState::Idle;
         self.metrics.buffer_fill_percent = 0;
+        self.reset_sync_timeline(false);
+        self.sync = ReceiverSyncSnapshot::from_profile(self.buffer_profile);
         self.sync_snapshot();
+    }
+}
+
+fn signed_instant_delta_ms(left: Instant, right: Instant) -> i32 {
+    if left >= right {
+        left.duration_since(right).as_millis().min(i32::MAX as u128) as i32
+    } else {
+        -((right.duration_since(left).as_millis().min(i32::MAX as u128)) as i32)
     }
 }
 
@@ -565,7 +724,7 @@ mod tests {
                 .expect("packet should be accepted");
         }
 
-        thread::sleep(Duration::from_millis(60));
+        thread::sleep(Duration::from_millis(120));
 
         let snapshot = runtime.snapshot();
         assert!(matches!(
@@ -573,6 +732,14 @@ mod tests {
             ReceiverServiceState::Buffering | ReceiverServiceState::Playing
         ));
         assert!(snapshot.metrics.packets_received >= 4);
+        assert!(matches!(
+            snapshot.sync.state,
+            ReceiverSyncState::Priming
+                | ReceiverSyncState::Locked
+                | ReceiverSyncState::Late
+                | ReceiverSyncState::Recovering
+        ));
+        assert!(snapshot.sync.expected_output_latency_ms > 0);
         assert!(writes.load(Ordering::SeqCst) > 0);
 
         runtime.stop().expect("runtime should stop");
@@ -617,6 +784,7 @@ mod tests {
                 sample_format: AudioSampleFormat::S16Le,
                 frames_per_packet: 480,
             },
+            requested_latency_ms: 150,
         }
     }
 
@@ -625,6 +793,7 @@ mod tests {
         ReceiverAudioPacket {
             sequence,
             captured_at_ms: sequence * 10,
+            captured_at_unix_ms: 1_000 + sequence * 10,
             payload: vec![0; stream.packet_bytes_hint()],
         }
     }

@@ -6,11 +6,9 @@ use std::{
 
 use mdns_sd::{Receiver, ResolvedService, ServiceDaemon, ServiceEvent, ServiceInfo};
 use synchrosonic_core::{
-    config::DiscoveryConfig,
-    services::DiscoveryService,
-    DeviceAvailability, DeviceCapabilities, DeviceId, DeviceStatus, DiscoveredDevice,
-    DiscoveryError, DiscoveryEvent, DiscoverySnapshot, TransportEndpoint,
-    DISCOVERY_PROTOCOL_VERSION,
+    config::DiscoveryConfig, services::DiscoveryService, DeviceAvailability, DeviceCapabilities,
+    DeviceId, DeviceStatus, DiscoveredDevice, DiscoveryError, DiscoveryEvent, DiscoverySnapshot,
+    TransportEndpoint, DISCOVERY_PROTOCOL_VERSION,
 };
 
 const TXT_APP_ID: &str = "app";
@@ -196,7 +194,8 @@ impl DiscoveryService for MdnsDiscoveryService {
             return Ok(());
         }
 
-        let mdns = ServiceDaemon::new().map_err(|error| DiscoveryError::Daemon(error.to_string()))?;
+        let mdns =
+            ServiceDaemon::new().map_err(|error| DiscoveryError::Daemon(error.to_string()))?;
         let service_info = self.build_service_info()?;
         let fullname = service_info.get_fullname().to_string();
 
@@ -436,14 +435,8 @@ fn txt_properties(profile: &LocalDiscoveryProfile) -> Vec<(&'static str, String)
         (TXT_DEVICE_ID, profile.device_id.as_str().to_string()),
         (TXT_DEVICE_NAME, profile.device_name.clone()),
         (TXT_APP_VERSION, profile.app_version.clone()),
-        (
-            TXT_PROTOCOL_VERSION,
-            DISCOVERY_PROTOCOL_VERSION.to_string(),
-        ),
-        (
-            TXT_SENDER,
-            profile.capabilities.supports_sender.to_string(),
-        ),
+        (TXT_PROTOCOL_VERSION, DISCOVERY_PROTOCOL_VERSION.to_string()),
+        (TXT_SENDER, profile.capabilities.supports_sender.to_string()),
         (
             TXT_RECEIVER,
             profile.capabilities.supports_receiver.to_string(),

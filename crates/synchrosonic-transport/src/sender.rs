@@ -137,7 +137,9 @@ impl LanSenderSession {
         };
         seeded_snapshot.local_mirror.playback_backend =
             Some(self.playback_engine.backend_name().to_string());
-        seeded_snapshot.targets.push(pending_target_snapshot(&initial_target));
+        seeded_snapshot
+            .targets
+            .push(pending_target_snapshot(&initial_target));
         seeded_snapshot.state = StreamSessionState::Connecting;
         sync_snapshot(&self.snapshot, seeded_snapshot);
 
@@ -350,8 +352,8 @@ impl ManagedTargetSession {
         );
 
         let mut stream =
-            TcpStream::connect_timeout(&target.endpoint.address, request.connect_timeout)
-                .map_err(|source| {
+            TcpStream::connect_timeout(&target.endpoint.address, request.connect_timeout).map_err(
+                |source| {
                     snapshot.state = StreamSessionState::Error;
                     snapshot.health = StreamTargetHealth::Unreachable;
                     snapshot.last_error = Some(
@@ -362,7 +364,8 @@ impl ManagedTargetSession {
                         .to_string(),
                     );
                     snapshot.clone()
-                })?;
+                },
+            )?;
         stream.set_nodelay(true).map_err(|source| {
             snapshot.state = StreamSessionState::Error;
             snapshot.health = StreamTargetHealth::Error;
@@ -497,7 +500,10 @@ impl ManagedTargetSession {
                         StreamTargetHealth::Unreachable,
                     );
                 }
-                InboundControl::Error { message, wire_bytes } => {
+                InboundControl::Error {
+                    message,
+                    wire_bytes,
+                } => {
                     self.snapshot.metrics.bytes_received += wire_bytes;
                     self.snapshot.metrics.packets_received += 1;
                     self.set_error(message, StreamTargetHealth::Error);
@@ -743,6 +749,7 @@ struct SenderManager<B> {
     local_mirror_request: PlaybackStartRequest,
     local_mirror_branch: LocalMirrorBranch,
     capture: Option<Box<dyn AudioCapture>>,
+    capture_started_unix_ms: Option<u64>,
     snapshot: Arc<Mutex<StreamSessionSnapshot>>,
     shared_snapshot: StreamSessionSnapshot,
     control_rx: Receiver<SenderCommand>,
@@ -813,6 +820,7 @@ where
             local_mirror_request,
             local_mirror_branch,
             capture: None,
+            capture_started_unix_ms: None,
             snapshot,
             shared_snapshot,
             control_rx,
@@ -891,8 +899,9 @@ where
                     if self.capture.is_some() {
                         if enabled {
                             self.shared_snapshot.local_mirror.state = LocalMirrorState::Starting;
-                            if let Err(error) =
-                                self.local_mirror_branch.start(self.local_mirror_request.clone())
+                            if let Err(error) = self
+                                .local_mirror_branch
+                                .start(self.local_mirror_request.clone())
                             {
                                 self.shared_snapshot.local_mirror.state = LocalMirrorState::Error;
                                 self.shared_snapshot.local_mirror.last_error =
@@ -924,7 +933,8 @@ where
                 TargetConnectResult::Connected(session) => {
                     let device_id = session.target.receiver_id.clone();
                     if !self.targets.contains(&device_id) {
-                        let _ = session.shutdown_with_stop("sender target was removed before activation");
+                        let _ = session
+                            .shutdown_with_stop("sender target was removed before activation");
                         continue;
                     }
 
@@ -1016,9 +1026,15 @@ where
 
         match capture.try_recv_frame() {
             Ok(Some(frame)) => {
+                let captured_at_ms = frame.captured_at.as_millis() as u64;
+                let captured_at_unix_ms = self
+                    .capture_started_unix_ms
+                    .unwrap_or_else(now_unix_ms)
+                    .saturating_add(captured_at_ms);
                 let base_frame = FanoutAudioFrame {
                     sequence: frame.sequence,
-                    captured_at_ms: frame.captured_at.as_millis() as u64,
+                    captured_at_ms,
+                    captured_at_unix_ms,
                     payload: frame.payload,
                 };
 
@@ -1051,7 +1067,8 @@ where
                 }
 
                 for device_id in failed_targets {
-                    if let Some(TargetSessionEntry::Active(session)) = self.targets.remove(&device_id)
+                    if let Some(TargetSessionEntry::Active(session)) =
+                        self.targets.remove(&device_id)
                     {
                         let snapshot = session.shutdown_immediate();
                         self.shared_snapshot.last_error = snapshot.last_error.clone();
@@ -1078,6 +1095,7 @@ where
 
         let capture = self.backend.start_capture(self.capture_settings.clone())?;
         self.capture = Some(capture);
+        self.capture_started_unix_ms = Some(now_unix_ms());
         tracing::info!(
             manager_session_id = %self.manager_session_id,
             "multi-device sender capture started"
@@ -1100,6 +1118,7 @@ where
         if let Some(mut capture) = self.capture.take() {
             let _ = capture.stop();
         }
+        self.capture_started_unix_ms = None;
 
         if matches!(
             self.shared_snapshot.local_mirror.state,
@@ -1186,15 +1205,11 @@ fn network_writer_loop(
                     wire_bytes: wire_bytes as u64,
                 }),
                 NetworkControl::Stop { reason } => {
-                    let result = write_message(
-                        &mut stream,
-                        FrameKind::Stop,
-                        &StopMessage { reason },
-                        &[],
-                    )
-                    .map(|wire_bytes| NetworkEvent::StopSent {
-                        wire_bytes: wire_bytes as u64,
-                    });
+                    let result =
+                        write_message(&mut stream, FrameKind::Stop, &StopMessage { reason }, &[])
+                            .map(|wire_bytes| NetworkEvent::StopSent {
+                                wire_bytes: wire_bytes as u64,
+                            });
                     match result {
                         Ok(event) => {
                             let _ = event_tx.send(event);
@@ -1227,6 +1242,7 @@ fn network_writer_loop(
                 let metadata = AudioMessage {
                     sequence: frame.sequence,
                     captured_at_ms: frame.captured_at_ms,
+                    captured_at_unix_ms: frame.captured_at_unix_ms,
                 };
                 match write_message(&mut stream, FrameKind::Audio, &metadata, &frame.payload) {
                     Ok(wire_bytes) => {
@@ -1316,7 +1332,10 @@ fn sender_reader_loop(mut stream: TcpStream, inbound_tx: Sender<InboundControl>)
                 }
             }
             Err(TransportError::Io { source, .. })
-                if matches!(source.kind(), ErrorKind::UnexpectedEof | ErrorKind::ConnectionReset) =>
+                if matches!(
+                    source.kind(),
+                    ErrorKind::UnexpectedEof | ErrorKind::ConnectionReset
+                ) =>
             {
                 let _ = inbound_tx.send(InboundControl::Disconnected);
                 break;

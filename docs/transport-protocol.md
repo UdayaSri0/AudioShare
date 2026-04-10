@@ -79,7 +79,7 @@ Purpose:
 - confirms session start
 - negotiates the codec
 - confirms stream parameters
-- returns receiver-side timing values
+- returns the receiver's current expected output latency target in milliseconds
 
 ### `Audio`
 
@@ -89,6 +89,7 @@ Metadata:
 
 - `sequence`
 - `captured_at_ms`
+- `captured_at_unix_ms`
 
 Payload:
 
@@ -190,6 +191,12 @@ On the receiver side:
 - disconnects become `Disconnected`
 - protocol/runtime failures become `Error`
 
+`ReceiverRuntime` now uses `captured_at_ms` as its media clock and schedules
+packet writes against that sender timeline plus the selected receiver-side
+buffer window. `captured_at_unix_ms` is carried as an explicit wall-clock
+reference for diagnostics and future sync work, but v1 scheduling does not rely
+on the sender and receiver system clocks being aligned.
+
 ## Stats
 
 Sender-side `StreamSessionSnapshot` exposes:
@@ -217,3 +224,12 @@ Receiver-side `ReceiverSnapshot` exposes:
 - `underruns`
 - `overruns`
 - `reconnect_attempts`
+- `buffer.queued_audio_ms`
+- `buffer.target_buffer_ms`
+- `buffer.max_buffer_ms`
+- `sync.state`
+- `sync.expected_output_latency_ms`
+- `sync.buffer_delta_ms`
+- `sync.schedule_error_ms`
+- `sync.late_packet_drops`
+- `sync.sync_resets`

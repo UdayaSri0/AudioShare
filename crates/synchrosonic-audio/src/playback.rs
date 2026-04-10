@@ -21,8 +21,10 @@ pub trait PlaybackSink: Send {
 
 pub trait PlaybackEngine: Send + Sync {
     fn backend_name(&self) -> &'static str;
-    fn start_stream(&self, request: PlaybackStartRequest)
-    -> Result<Box<dyn PlaybackSink>, AudioError>;
+    fn start_stream(
+        &self,
+        request: PlaybackStartRequest,
+    ) -> Result<Box<dyn PlaybackSink>, AudioError>;
 }
 
 impl LinuxPlaybackEngine {
@@ -160,10 +162,12 @@ impl PlaybackSink for PipeWirePlaybackSink {
             ),
         })?;
 
-        stdin.write_all(payload).map_err(|source| AudioError::ProcessIo {
-            context: "writing audio payload to pw-play".to_string(),
-            source,
-        })
+        stdin
+            .write_all(payload)
+            .map_err(|source| AudioError::ProcessIo {
+                context: "writing audio payload to pw-play".to_string(),
+                source,
+            })
     }
 
     fn stop(&mut self) -> Result<(), AudioError> {

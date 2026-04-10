@@ -100,6 +100,7 @@ pub struct AcceptMessage {
 pub struct AudioMessage {
     pub sequence: u64,
     pub captured_at_ms: u64,
+    pub captured_at_unix_ms: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -226,6 +227,7 @@ mod tests {
         let metadata = AudioMessage {
             sequence: 4,
             captured_at_ms: 99,
+            captured_at_unix_ms: 1_999,
         };
         let payload = vec![1_u8, 2, 3, 4];
         let mut encoded = Vec::new();

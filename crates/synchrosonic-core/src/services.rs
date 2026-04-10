@@ -16,7 +16,8 @@ pub trait AudioBackend {
     fn backend_name(&self) -> &'static str;
     fn list_sources(&self) -> Result<Vec<AudioSource>, AudioError>;
     fn list_playback_targets(&self) -> Result<Vec<PlaybackTarget>, AudioError>;
-    fn start_capture(&self, settings: CaptureSettings) -> Result<Box<dyn AudioCapture>, AudioError>;
+    fn start_capture(&self, settings: CaptureSettings)
+        -> Result<Box<dyn AudioCapture>, AudioError>;
 }
 
 pub trait DiscoveryService {

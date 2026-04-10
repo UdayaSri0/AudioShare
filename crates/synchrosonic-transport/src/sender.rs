@@ -129,9 +129,11 @@ impl LanSenderSession {
         let initial_target = target.clone();
         let local_playback_target_id = self.local_playback_target_id.clone();
 
-        let mut seeded_snapshot = StreamSessionSnapshot::default();
-        seeded_snapshot.session_id = Some(manager_session_id.clone());
-        seeded_snapshot.stream = Some(desired_stream.clone());
+        let mut seeded_snapshot = StreamSessionSnapshot {
+            session_id: Some(manager_session_id.clone()),
+            stream: Some(desired_stream.clone()),
+            ..StreamSessionSnapshot::default()
+        };
         seeded_snapshot.local_mirror.desired_enabled = capture_settings.outputs.local_monitoring;
         seeded_snapshot.local_mirror.playback_target_id = local_playback_target_id.clone();
         seeded_snapshot.local_mirror.state = if capture_settings.outputs.local_monitoring {
@@ -378,6 +380,7 @@ struct ManagedTargetSession {
 }
 
 impl ManagedTargetSession {
+    #[allow(clippy::result_large_err)]
     fn connect(
         target: SenderTarget,
         request: &TargetConnectRequest,
@@ -652,6 +655,7 @@ impl ManagedTargetSession {
     }
 }
 
+#[allow(clippy::large_enum_variant)]
 enum TargetSessionEntry {
     Pending(StreamTargetSnapshot),
     Active(ManagedTargetSession),
@@ -775,6 +779,7 @@ struct TargetConnectRequest {
     heartbeat_interval_ms: u16,
 }
 
+#[allow(clippy::large_enum_variant)]
 enum TargetConnectResult {
     Connected(ManagedTargetSession),
     Failed(StreamTargetSnapshot),
@@ -802,6 +807,7 @@ impl<B> SenderManager<B>
 where
     B: AudioBackend + Send + Sync + 'static,
 {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         backend: B,
         playback_engine: Arc<dyn PlaybackEngine>,
@@ -837,9 +843,11 @@ where
             heartbeat_interval_ms: config.heartbeat_interval_ms,
         };
 
-        let mut shared_snapshot = StreamSessionSnapshot::default();
-        shared_snapshot.session_id = Some(manager_session_id);
-        shared_snapshot.stream = Some(stream_config.clone());
+        let mut shared_snapshot = StreamSessionSnapshot {
+            session_id: Some(manager_session_id),
+            stream: Some(stream_config.clone()),
+            ..StreamSessionSnapshot::default()
+        };
         shared_snapshot.local_mirror.desired_enabled = capture_settings.outputs.local_monitoring;
         shared_snapshot.local_mirror.playback_target_id = local_playback_target_id;
         shared_snapshot.local_mirror.state = if capture_settings.outputs.local_monitoring {
@@ -928,10 +936,10 @@ where
                 }
                 SenderCommand::RemoveTarget(device_id) => {
                     tracing::info!(receiver_id = %device_id, "removing sender target");
-                    if let Some(entry) = self.targets.remove(&device_id) {
-                        if let TargetSessionEntry::Active(session) = entry {
-                            let _ = session.shutdown_with_stop("sender removed target");
-                        }
+                    if let Some(TargetSessionEntry::Active(session)) =
+                        self.targets.remove(&device_id)
+                    {
+                        let _ = session.shutdown_with_stop("sender removed target");
                     }
                 }
                 SenderCommand::SetLocalMirrorEnabled(enabled) => {

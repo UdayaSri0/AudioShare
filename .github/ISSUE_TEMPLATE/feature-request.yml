@@ -1,0 +1,45 @@
+name: Feature request
+description: Suggest an improvement for SynchroSonic.
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the suggestion. Please describe the user problem first, then the proposed solution.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem to solve
+      description: What user need or workflow pain point does this address?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: What would you like SynchroSonic to do?
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: What workarounds or other approaches did you consider?
+  - type: dropdown
+    id: scope
+    attributes:
+      label: Area
+      options:
+        - GUI
+        - Audio routing
+        - Discovery
+        - Casting
+        - Receiver mode
+        - Synchronization
+        - Bluetooth output
+        - Packaging
+        - Documentation
+    validations:
+      required: true

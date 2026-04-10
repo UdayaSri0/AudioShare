@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security policy
+    url: https://github.com/synchrosonic/synchrosonic/blob/main/SECURITY.md
+    about: Please avoid filing suspected security problems as public issues.
+  - name: Contribution guide
+    url: https://github.com/synchrosonic/synchrosonic/blob/main/CONTRIBUTING.md
+    about: Development setup, validation commands, and contribution expectations.

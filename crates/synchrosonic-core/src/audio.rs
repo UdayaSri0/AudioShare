@@ -33,8 +33,9 @@ impl AudioSampleFormat {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CaptureState {
+    #[default]
     Idle,
     Starting,
     Capturing,
@@ -148,12 +149,6 @@ pub struct CaptureStats {
     pub bytes_captured: u64,
     pub last_frame_stats: AudioFrameStats,
     pub last_error: Option<String>,
-}
-
-impl Default for CaptureState {
-    fn default() -> Self {
-        Self::Idle
-    }
 }
 
 fn stats_from_s16le(payload: &[u8]) -> AudioFrameStats {

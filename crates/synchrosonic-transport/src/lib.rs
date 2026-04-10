@@ -129,9 +129,11 @@ mod tests {
         let playback_engine = Arc::new(MockPlaybackEngine {
             bytes_written: Arc::clone(&receiver_bytes_written),
         });
-        let mut receiver_config = synchrosonic_core::config::ReceiverConfig::default();
-        receiver_config.enabled = true;
-        receiver_config.listen_port = 0;
+        let receiver_config = synchrosonic_core::config::ReceiverConfig {
+            enabled: true,
+            listen_port: 0,
+            ..synchrosonic_core::config::ReceiverConfig::default()
+        };
         let receiver_runtime = Arc::new(Mutex::new(ReceiverRuntime::with_playback_engine(
             receiver_config.clone(),
             playback_engine,
@@ -428,9 +430,11 @@ mod tests {
     }
 
     fn spawn_test_receiver(playback_engine: Arc<dyn PlaybackEngine>) -> Option<SpawnedReceiver> {
-        let mut receiver_config = synchrosonic_core::config::ReceiverConfig::default();
-        receiver_config.enabled = true;
-        receiver_config.listen_port = 0;
+        let receiver_config = synchrosonic_core::config::ReceiverConfig {
+            enabled: true,
+            listen_port: 0,
+            ..synchrosonic_core::config::ReceiverConfig::default()
+        };
         let runtime = Arc::new(Mutex::new(ReceiverRuntime::with_playback_engine(
             receiver_config.clone(),
             playback_engine,

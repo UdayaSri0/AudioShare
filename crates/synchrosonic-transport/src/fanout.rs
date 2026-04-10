@@ -7,7 +7,7 @@ use std::{
     time::Duration,
 };
 
-use flume::{Receiver, RecvTimeoutError, Sender, TryRecvError, TrySendError};
+use flume::{Receiver, RecvTimeoutError, Sender, TrySendError};
 use synchrosonic_audio::{PlaybackEngine, PlaybackSink, PlaybackStartRequest};
 use synchrosonic_core::{LocalMirrorState, StreamBranchBufferSnapshot, TransportError};
 
@@ -299,12 +299,7 @@ fn local_mirror_worker_loop(
 }
 
 fn clear_stale_frames(frame_rx: &Receiver<FanoutAudioFrame>) {
-    loop {
-        match frame_rx.try_recv() {
-            Ok(_) => {}
-            Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
-        }
-    }
+    while frame_rx.try_recv().is_ok() {}
 }
 
 #[cfg(test)]

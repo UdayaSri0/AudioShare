@@ -1,0 +1,71 @@
+name: Bug report
+description: Report a reproducible problem with SynchroSonic.
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a bug. Please include concrete Linux, PipeWire, and reproduction details so we can debug it effectively.
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      description: What version, tag, or commit are you running?
+      placeholder: 0.1.0 or commit SHA
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Linux environment
+      description: Include distro, version, desktop environment, and whether PipeWire is in use.
+      placeholder: Ubuntu 24.04, GNOME on Wayland, PipeWire 1.x
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Provide exact steps.
+      placeholder: |
+        1. Start SynchroSonic
+        2. Open Receiver mode
+        3. Reproduce the issue
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Diagnostics or logs
+      description: Paste relevant diagnostics, stack traces, or structured log lines if available.
+      render: text
+  - type: dropdown
+    id: area
+    attributes:
+      label: Affected area
+      options:
+        - GUI
+        - Audio capture
+        - Discovery
+        - Casting
+        - Receiver mode
+        - Synchronization
+        - Bluetooth output
+        - Packaging
+        - Documentation
+    validations:
+      required: true

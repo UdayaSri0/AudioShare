@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>org.synchrosonic.SynchroSonic.desktop</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+  <name>SynchroSonic</name>
+  <summary>Linux-first LAN audio casting and receiver control</summary>
+  <developer id="org.synchrosonic">
+    <name>SynchroSonic Contributors</name>
+  </developer>
+  <launchable type="desktop-id">org.synchrosonic.SynchroSonic.desktop</launchable>
+  <provides>
+    <binary>synchrosonic-app</binary>
+  </provides>
+  <url type="homepage">https://github.com/synchrosonic/synchrosonic</url>
+  <url type="bugtracker">https://github.com/synchrosonic/synchrosonic/issues</url>
+  <description>
+    <p>
+      SynchroSonic is a Linux-first GTK4/libadwaita desktop application for
+      capturing system audio, discovering receivers, casting over the local
+      network, running a receiver mode, and inspecting stream, sync, and buffer
+      health.
+    </p>
+    <p>
+      The current release track focuses on Linux PipeWire tooling, LAN
+      transport, and explicit diagnostics. Bluetooth support is intentionally
+      limited to selecting local Linux playback outputs exposed by PipeWire.
+    </p>
+  </description>
+  <categories>
+    <category>AudioVideo</category>
+    <category>Audio</category>
+    <category>Network</category>
+  </categories>
+  <keywords>
+    <keyword>audio</keyword>
+    <keyword>streaming</keyword>
+    <keyword>lan</keyword>
+    <keyword>pipewire</keyword>
+    <keyword>receiver</keyword>
+    <keyword>casting</keyword>
+  </keywords>
+  <content_rating type="oars-1.1" />
+</component>

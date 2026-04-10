@@ -164,6 +164,7 @@ impl Drop for LanReceiverTransportServer {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn receiver_listener_loop(
     listener: TcpListener,
     receiver_name: String,
@@ -243,6 +244,7 @@ fn receiver_listener_loop(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn handle_receiver_session(
     mut stream: TcpStream,
     peer_addr: SocketAddr,

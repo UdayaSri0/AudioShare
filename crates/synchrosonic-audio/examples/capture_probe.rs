@@ -29,8 +29,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         .unwrap_or(&sources[0]);
     println!("Starting capture probe from: {}", source.display_name);
 
-    let mut settings = CaptureSettings::default();
-    settings.source_id = Some(source.id.clone());
+    let settings = CaptureSettings {
+        source_id: Some(source.id.clone()),
+        ..CaptureSettings::default()
+    };
     let mut capture = backend.start_capture(settings)?;
 
     let started = Instant::now();

@@ -5,7 +5,12 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+description.workspace = true
 authors.workspace = true
+readme = "../../README.md"
+categories = ["gui", "multimedia::audio"]
+keywords = ["audio", "streaming", "lan", "pipewire", "gtk"]
 
 [dependencies]
 adw.workspace = true

@@ -1,4 +1,5 @@
 mod logging;
+mod metadata;
 mod persistence;
 mod ui;
 
@@ -7,6 +8,7 @@ use synchrosonic_core::DiagnosticEvent;
 
 use crate::{
     logging::init_logging,
+    metadata::APP_ID,
     persistence::{load_startup_config, AppPaths},
 };
 
@@ -28,9 +30,7 @@ fn main() -> gtk::glib::ExitCode {
         log_store: logging.store,
     };
 
-    let app = adw::Application::builder()
-        .application_id("org.synchrosonic.SynchroSonic")
-        .build();
+    let app = adw::Application::builder().application_id(APP_ID).build();
 
     app.connect_activate(move |app| ui::build_main_window(app, launch.clone()));
     app.run()

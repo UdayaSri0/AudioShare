@@ -1,0 +1,14 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=SynchroSonic
+Comment=Linux-first LAN audio casting and receiver control
+Exec=synchrosonic-app
+TryExec=synchrosonic-app
+Icon=org.synchrosonic.SynchroSonic
+Terminal=false
+StartupNotify=true
+Categories=AudioVideo;Audio;GTK;
+Keywords=audio;streaming;lan;pipewire;receiver;casting;
+StartupWMClass=SynchroSonic
+X-GNOME-UsesNotifications=true

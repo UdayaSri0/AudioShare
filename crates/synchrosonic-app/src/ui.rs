@@ -22,6 +22,7 @@ use synchrosonic_transport::{LanReceiverTransportServer, LanSenderSession, Sende
 
 use crate::{
     logging::{LogStore, StructuredLogEntry},
+    metadata,
     persistence::{export_config, import_config, save_active_config, AppPaths},
 };
 
@@ -203,14 +204,14 @@ pub fn build_main_window(app: &adw::Application, launch: UiLaunchContext) {
 
     let window = adw::ApplicationWindow::builder()
         .application(app)
-        .title("SynchroSonic")
+        .title(metadata::APP_NAME)
         .default_width(1240)
         .default_height(860)
         .build();
 
     let header = gtk::HeaderBar::new();
     let brand = gtk::Box::new(Orientation::Vertical, 0);
-    let brand_title = gtk::Label::new(Some("SynchroSonic"));
+    let brand_title = gtk::Label::new(Some(metadata::APP_NAME));
     brand_title.add_css_class("title-4");
     brand_title.set_halign(Align::Start);
     let brand_subtitle = gtk::Label::new(Some("Linux-native LAN audio casting"));
@@ -2205,7 +2206,9 @@ fn settings_page() -> (gtk::ScrolledWindow, SettingsWidgets) {
 
     let settings_group = preferences_group(
         "Run-time preferences",
-        Some("These controls affect the current run; durable persistence is planned next."),
+        Some(
+            "These controls are persisted to disk and restored on restart where the runtime can safely apply them.",
+        ),
     );
     let quality_selector = gtk::ComboBoxText::new();
     let quality_row = control_row(
@@ -2237,7 +2240,7 @@ fn settings_page() -> (gtk::ScrolledWindow, SettingsWidgets) {
     let config_path_row = summary_row("Active config file");
     let portable_config_row = summary_row("Portable config file");
     let log_path_row = summary_row("Structured log file");
-    let note_status_row = summary_row("Next phase");
+    let note_status_row = summary_row("Persistence status");
     let import_export_buttons = gtk::Box::new(Orientation::Horizontal, 12);
     let import_button = gtk::Button::with_label("Import portable config");
     let export_button = gtk::Button::with_label("Export portable config");
@@ -2280,26 +2283,48 @@ fn settings_page() -> (gtk::ScrolledWindow, SettingsWidgets) {
 fn about_page() -> gtk::ScrolledWindow {
     let (page, content) = page_shell(
         "About",
-        "Project and contributor placeholders live here until release packaging and branding are finalized.",
+        "Release metadata, support paths, and current scope are surfaced here so packaged Linux builds stay self-describing.",
     );
 
     let about_group = preferences_group(
         "Project",
-        Some("Core metadata and scope for the current implementation."),
+        Some("Core metadata, release identity, and scope for the current implementation."),
     );
     let project_row = summary_row("Project");
-    project_row.set_subtitle("SynchroSonic is a Linux-first Rust application for LAN audio capture, casting, receiver playback, diagnostics, and local output management.");
-    let developer_row = summary_row("Developer");
-    developer_row.set_subtitle("Maintainer placeholder: update with the project owner or contributor credits before release.");
-    let source_row = summary_row("Open source");
-    source_row.set_subtitle(
-        "GPL-3.0-or-later. Repository placeholder: https://github.com/synchrosonic/synchrosonic",
-    );
+    project_row.set_subtitle(metadata::APP_SUMMARY);
+    let version_row = summary_row("Version");
+    version_row.set_subtitle(&format!(
+        "{} · application id {} · binary {} · icon {}",
+        metadata::APP_VERSION,
+        metadata::APP_ID,
+        metadata::APP_BINARY_NAME,
+        metadata::APP_ICON_NAME
+    ));
+    let developer_row = summary_row("Developers");
+    developer_row.set_subtitle(&metadata::authors_display());
+    let source_row = summary_row("Source and license");
+    source_row.set_subtitle(&format!(
+        "{} · repo {}",
+        metadata::APP_LICENSE,
+        metadata::APP_REPOSITORY
+    ));
+    let support_row = summary_row("Support");
+    support_row.set_subtitle(&format!(
+        "Issues: {} · Security policy: {} · Contributing guide: {}",
+        metadata::APP_BUG_TRACKER,
+        metadata::APP_SECURITY_POLICY_PATH,
+        metadata::APP_CONTRIBUTING_PATH
+    ));
+    let homepage_row = summary_row("Homepage");
+    homepage_row.set_subtitle(metadata::APP_HOMEPAGE);
     let scope_row = summary_row("Current Bluetooth scope");
     scope_row.set_subtitle("Bluetooth is treated as a local playback-output choice on Linux, not as a separate streaming transport or receiver discovery path.");
     about_group.add(&project_row);
+    about_group.add(&version_row);
     about_group.add(&developer_row);
     about_group.add(&source_row);
+    about_group.add(&support_row);
+    about_group.add(&homepage_row);
     about_group.add(&scope_row);
     content.append(&about_group);
 

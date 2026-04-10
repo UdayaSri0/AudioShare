@@ -279,14 +279,9 @@ impl ReceiverWorker {
             self.state = ReceiverServiceState::Listening;
         }
 
-        if self.connection.is_some() {
+        if let Some(connection) = &self.connection {
             let request = PlaybackStartRequest {
-                stream: self
-                    .connection
-                    .as_ref()
-                    .expect("connection should still be present")
-                    .stream
-                    .clone(),
+                stream: connection.stream.clone(),
                 target_id: self.config.playback_target_id.clone(),
                 latency_ms: self.buffer_profile.playback_latency_ms,
             };
@@ -777,8 +772,10 @@ mod tests {
 
     #[test]
     fn runtime_starts_and_stops_cleanly() {
-        let mut config = ReceiverConfig::default();
-        config.enabled = true;
+        let config = ReceiverConfig {
+            enabled: true,
+            ..ReceiverConfig::default()
+        };
         let writes = Arc::new(AtomicUsize::new(0));
         let engine = Arc::new(MockPlaybackEngine {
             writes: Arc::clone(&writes),
@@ -829,9 +826,11 @@ mod tests {
 
     #[test]
     fn runtime_moves_from_buffering_to_playing_when_packets_arrive() {
-        let mut config = ReceiverConfig::default();
-        config.enabled = true;
-        config.latency_preset = ReceiverLatencyPreset::LowLatency;
+        let config = ReceiverConfig {
+            enabled: true,
+            latency_preset: ReceiverLatencyPreset::LowLatency,
+            ..ReceiverConfig::default()
+        };
         let writes = Arc::new(AtomicUsize::new(0));
         let engine = Arc::new(MockPlaybackEngine {
             writes: Arc::clone(&writes),
@@ -872,8 +871,10 @@ mod tests {
 
     #[test]
     fn runtime_tracks_reconnect_attempts_on_disconnect() {
-        let mut config = ReceiverConfig::default();
-        config.enabled = true;
+        let config = ReceiverConfig {
+            enabled: true,
+            ..ReceiverConfig::default()
+        };
         let engine = Arc::new(MockPlaybackEngine {
             writes: Arc::new(AtomicUsize::new(0)),
         });

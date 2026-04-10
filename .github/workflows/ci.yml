@@ -1,0 +1,69 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  lint-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libgtk-4-dev libadwaita-1-dev desktop-file-utils
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Check formatting
+        run: cargo fmt --all --check
+
+      - name: Lint workspace
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Run tests
+        run: cargo test --workspace
+
+  package-linux:
+    runs-on: ubuntu-latest
+    needs: lint-test
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libgtk-4-dev libadwaita-1-dev desktop-file-utils
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build release binary
+        run: cargo build --release -p synchrosonic-app
+
+      - name: Stage Linux packaging layouts
+        run: bash scripts/package-linux.sh --skip-build
+
+      - name: Upload staged packaging artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: synchrosonic-linux-packaging
+          path: |
+            target/release-packaging/*.tar.gz
+            packaging/linux/org.synchrosonic.SynchroSonic.desktop
+            packaging/linux/org.synchrosonic.SynchroSonic.metainfo.xml
+            packaging/linux/org.synchrosonic.SynchroSonic.svg

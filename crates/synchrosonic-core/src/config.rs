@@ -356,18 +356,10 @@ impl Default for UiConfig {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct DiagnosticsConfig {
     pub verbose_logging: bool,
-}
-
-impl Default for DiagnosticsConfig {
-    fn default() -> Self {
-        Self {
-            verbose_logging: false,
-        }
-    }
 }
 
 #[cfg(test)]

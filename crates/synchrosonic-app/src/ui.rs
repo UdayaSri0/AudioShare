@@ -13,11 +13,14 @@ use synchrosonic_audio::LinuxAudioBackend;
 use synchrosonic_core::{
     services::{AudioBackend, DiscoveryService, ReceiverService},
     AppConfig, AppState, AudioSourceKind, DeviceId, DiagnosticEvent, DiscoveredDevice,
-    StreamTargetSnapshot,
+    PlaybackTarget, PlaybackTargetKind, StreamTargetSnapshot,
 };
 use synchrosonic_discovery::MdnsDiscoveryService;
 use synchrosonic_receiver::ReceiverRuntime;
 use synchrosonic_transport::{LanReceiverTransportServer, LanSenderSession, SenderTarget};
+
+const DEFAULT_PLAYBACK_TARGET_ID: &str = "__system_default_playback__";
+const SYSTEM_DEFAULT_OUTPUT_LABEL: &str = "System default output";
 
 pub fn build_main_window(app: &adw::Application) {
     let mut config = AppConfig::default();
@@ -39,6 +42,31 @@ pub fn build_main_window(app: &adw::Application) {
         }
         Err(error) => {
             let message = format!("PipeWire source enumeration failed: {error}");
+            state
+                .diagnostics
+                .push(DiagnosticEvent::warning("audio", message.clone()));
+            message
+        }
+    };
+    let playback_target_summary = match audio_backend.list_playback_targets() {
+        Ok(targets) => {
+            let target_count = targets.len();
+            let bluetooth_count = targets
+                .iter()
+                .filter(|target| target.is_bluetooth())
+                .count();
+            let default_target = targets
+                .iter()
+                .find(|target| target.is_default)
+                .map(|target| target.display_name.clone())
+                .unwrap_or_else(|| SYSTEM_DEFAULT_OUTPUT_LABEL.to_string());
+            state.set_playback_targets(targets);
+            format!(
+                "{target_count} playback output(s) available, {bluetooth_count} Bluetooth. Default target: {default_target}"
+            )
+        }
+        Err(error) => {
+            let message = format!("PipeWire playback target enumeration failed: {error}");
             state
                 .diagnostics
                 .push(DiagnosticEvent::warning("audio", message.clone()));
@@ -68,6 +96,10 @@ pub fn build_main_window(app: &adw::Application) {
         config.transport.heartbeat_interval_ms,
     )));
     let sender = Arc::new(Mutex::new(LanSenderSession::new(config.transport.clone())));
+    let _ = sender
+        .lock()
+        .expect("sender session mutex")
+        .set_local_playback_target(config.audio.local_playback_target_id.clone());
     state.apply_receiver_snapshot(receiver.lock().expect("receiver runtime mutex").snapshot());
     state.apply_streaming_snapshot(sender.lock().expect("sender session mutex").snapshot());
     let state = Rc::new(RefCell::new(state));
@@ -104,13 +136,14 @@ pub fn build_main_window(app: &adw::Application) {
     stack.add_titled(&dashboard, Some("dashboard"), "Dashboard");
     let (devices_page, devices_label) = discovery_page(&state.borrow(), &discovery_summary);
     stack.add_titled(&devices_page, Some("devices"), "Devices");
-    let (streaming_page, streaming_status_label, receiver_selector) = streaming_page(
-        Rc::clone(&state),
-        Arc::clone(&sender),
-        audio_backend.clone(),
-    );
+    let (streaming_page, streaming_status_label, receiver_selector, local_output_selector) =
+        streaming_page(
+            Rc::clone(&state),
+            Arc::clone(&sender),
+            audio_backend.clone(),
+        );
     stack.add_titled(&streaming_page, Some("streaming"), "Streaming");
-    let (receiver_page, receiver_status_label) = receiver_page(
+    let (receiver_page, receiver_status_label, receiver_output_selector) = receiver_page(
         Rc::clone(&state),
         Arc::clone(&receiver),
         Arc::clone(&receiver_transport),
@@ -120,7 +153,7 @@ pub fn build_main_window(app: &adw::Application) {
         &status_page(
             "Audio",
             &format!(
-                "{audio_source_summary}\nCapture frames expose sequence, timestamp, PCM payload bytes, peak, and RMS stats for local monitoring and the network encoder."
+                "{audio_source_summary}\n{playback_target_summary}\nCapture frames expose sequence, timestamp, PCM payload bytes, peak, and RMS stats for local monitoring and the network encoder."
             ),
         ),
         Some("audio"),
@@ -175,7 +208,7 @@ pub fn build_main_window(app: &adw::Application) {
         Arc::clone(&receiver),
         Arc::clone(&receiver_transport),
         Rc::clone(&state),
-        receiver_status_label,
+        receiver_status_label.clone(),
         dashboard_status_label.clone(),
         audio_backend.backend_name().to_string(),
         audio_source_summary.clone(),
@@ -183,9 +216,22 @@ pub fn build_main_window(app: &adw::Application) {
     start_streaming_poll(
         Arc::clone(&sender),
         Rc::clone(&state),
-        streaming_status_label,
-        dashboard_status_label,
+        streaming_status_label.clone(),
+        dashboard_status_label.clone(),
         receiver_selector,
+        audio_backend.backend_name().to_string(),
+        audio_source_summary.clone(),
+    );
+    start_playback_target_poll(
+        audio_backend.clone(),
+        Arc::clone(&sender),
+        Arc::clone(&receiver),
+        Rc::clone(&state),
+        local_output_selector,
+        receiver_output_selector,
+        streaming_status_label,
+        receiver_status_label,
+        dashboard_status_label,
         audio_backend.backend_name().to_string(),
         audio_source_summary.clone(),
     );
@@ -287,7 +333,7 @@ fn streaming_page(
     state: Rc<RefCell<AppState>>,
     sender: Arc<Mutex<LanSenderSession>>,
     audio_backend: LinuxAudioBackend,
-) -> (gtk::Box, gtk::Label, gtk::ComboBoxText) {
+) -> (gtk::Box, gtk::Label, gtk::ComboBoxText, gtk::ComboBoxText) {
     let page = gtk::Box::new(Orientation::Vertical, 12);
     page.set_margin_top(24);
     page.set_margin_bottom(24);
@@ -328,6 +374,20 @@ fn streaming_page(
     mirror_row.append(&mirror_label);
     mirror_row.append(&mirror_switch);
     page.append(&mirror_row);
+
+    let mirror_target_selector = gtk::ComboBoxText::new();
+    refresh_playback_target_selector(
+        &mirror_target_selector,
+        &state.borrow(),
+        state
+            .borrow()
+            .config
+            .audio
+            .local_playback_target_id
+            .as_deref(),
+        "Local mirror output: system default",
+    );
+    page.append(&mirror_target_selector);
 
     let controls = gtk::Box::new(Orientation::Horizontal, 12);
     let start_button = gtk::Button::with_label("Add Selected Target");
@@ -382,6 +442,51 @@ fn streaming_page(
                     state.diagnostics.push(DiagnosticEvent::error(
                         "streaming",
                         format!("Failed to update local playback mirror: {error}"),
+                    ));
+                }
+            }
+
+            status_label.set_text(&format_streaming_status(&state));
+        });
+    }
+
+    {
+        let state = Rc::clone(&state);
+        let sender = Arc::clone(&sender);
+        let status_label = status_label.clone();
+        mirror_target_selector.connect_changed(move |selector| {
+            let target_id = selector
+                .active_id()
+                .and_then(|id| playback_target_id_from_selection(id.as_str()));
+            if state.borrow().config.audio.local_playback_target_id == target_id {
+                return;
+            }
+
+            let result = {
+                let mut sender = sender.lock().expect("sender session mutex");
+                sender.set_local_playback_target(target_id.clone())
+            };
+
+            let snapshot = sender.lock().expect("sender session mutex").snapshot();
+            let mut state = state.borrow_mut();
+            state.select_local_playback_target(target_id.clone());
+            state.apply_streaming_snapshot(snapshot);
+
+            match result {
+                Ok(()) => {
+                    let selected_target = format_selected_playback_target(
+                        &state,
+                        state.config.audio.local_playback_target_id.as_deref(),
+                    );
+                    state.diagnostics.push(DiagnosticEvent::info(
+                        "streaming",
+                        format!("Local mirror output target set to {selected_target}."),
+                    ));
+                }
+                Err(error) => {
+                    state.diagnostics.push(DiagnosticEvent::warning(
+                        "streaming",
+                        format!("Failed to update local mirror output target: {error}"),
                     ));
                 }
             }
@@ -548,14 +653,19 @@ fn streaming_page(
         });
     }
 
-    (page, status_label, receiver_selector)
+    (
+        page,
+        status_label,
+        receiver_selector,
+        mirror_target_selector,
+    )
 }
 
 fn receiver_page(
     state: Rc<RefCell<AppState>>,
     receiver: Arc<Mutex<ReceiverRuntime>>,
     receiver_transport: Arc<Mutex<LanReceiverTransportServer>>,
-) -> (gtk::Box, gtk::Label) {
+) -> (gtk::Box, gtk::Label, gtk::ComboBoxText) {
     let page = gtk::Box::new(Orientation::Vertical, 12);
     page.set_margin_top(24);
     page.set_margin_bottom(24);
@@ -574,6 +684,15 @@ fn receiver_page(
     summary.set_halign(Align::Start);
     page.append(&summary);
 
+    let receiver_output_selector = gtk::ComboBoxText::new();
+    refresh_playback_target_selector(
+        &receiver_output_selector,
+        &state.borrow(),
+        state.borrow().config.receiver.playback_target_id.as_deref(),
+        "Receiver output: system default",
+    );
+    page.append(&receiver_output_selector);
+
     let controls = gtk::Box::new(Orientation::Horizontal, 12);
     let start_button = gtk::Button::with_label("Start Receiver");
     let stop_button = gtk::Button::with_label("Stop Receiver");
@@ -586,6 +705,60 @@ fn receiver_page(
     status_label.set_selectable(true);
     status_label.set_halign(Align::Start);
     page.append(&status_label);
+
+    {
+        let state = Rc::clone(&state);
+        let receiver = Arc::clone(&receiver);
+        let status_label = status_label.clone();
+        receiver_output_selector.connect_changed(move |selector| {
+            let target_id = selector
+                .active_id()
+                .and_then(|id| playback_target_id_from_selection(id.as_str()));
+            if state.borrow().config.receiver.playback_target_id == target_id {
+                return;
+            }
+
+            let result = receiver
+                .lock()
+                .expect("receiver runtime mutex")
+                .set_playback_target(target_id.clone());
+            let snapshot = receiver.lock().expect("receiver runtime mutex").snapshot();
+            let mut state = state.borrow_mut();
+            state.select_receiver_playback_target(target_id.clone());
+            state.apply_receiver_snapshot(snapshot);
+
+            match result {
+                Ok(()) => {
+                    let scope = if matches!(
+                        state.receiver.state,
+                        synchrosonic_core::ReceiverServiceState::Connected
+                            | synchrosonic_core::ReceiverServiceState::Buffering
+                            | synchrosonic_core::ReceiverServiceState::Playing
+                    ) {
+                        "active receiver playback"
+                    } else {
+                        "next receiver playback session"
+                    };
+                    let selected_target = format_selected_playback_target(
+                        &state,
+                        state.config.receiver.playback_target_id.as_deref(),
+                    );
+                    state.diagnostics.push(DiagnosticEvent::info(
+                        "receiver",
+                        format!("Receiver output target set to {selected_target} for the {scope}."),
+                    ));
+                }
+                Err(error) => {
+                    state.diagnostics.push(DiagnosticEvent::warning(
+                        "receiver",
+                        format!("Failed to update receiver playback target: {error}"),
+                    ));
+                }
+            }
+
+            status_label.set_text(&format_receiver_status(&state));
+        });
+    }
 
     {
         let state = Rc::clone(&state);
@@ -683,7 +856,7 @@ fn receiver_page(
         });
     }
 
-    (page, status_label)
+    (page, status_label, receiver_output_selector)
 }
 
 fn start_discovery_poll(
@@ -924,6 +1097,247 @@ fn start_streaming_poll(
     });
 }
 
+fn start_playback_target_poll(
+    audio_backend: LinuxAudioBackend,
+    sender: Arc<Mutex<LanSenderSession>>,
+    receiver: Arc<Mutex<ReceiverRuntime>>,
+    state: Rc<RefCell<AppState>>,
+    local_output_selector: gtk::ComboBoxText,
+    receiver_output_selector: gtk::ComboBoxText,
+    streaming_status_label: gtk::Label,
+    receiver_status_label: gtk::Label,
+    dashboard_status_label: gtk::Label,
+    audio_backend_name: String,
+    audio_source_summary: String,
+) {
+    let mut last_error = None::<String>;
+
+    glib::timeout_add_seconds_local(1, move || {
+        match audio_backend.list_playback_targets() {
+            Ok(targets) => {
+                last_error = None;
+
+                let mut local_retry_target = None::<Option<String>>;
+                let mut local_transition_message = None::<DiagnosticEvent>;
+                let mut receiver_transition_message = None::<DiagnosticEvent>;
+
+                {
+                    let mut state = state.borrow_mut();
+                    let targets_changed = state.playback_targets != targets;
+                    let previous_local_available = state.local_playback_target_available();
+                    let previous_receiver_available = state.receiver_playback_target_available();
+                    let previous_local_target_id =
+                        state.config.audio.local_playback_target_id.clone();
+                    let previous_receiver_target_id =
+                        state.config.receiver.playback_target_id.clone();
+
+                    state.set_playback_targets(targets);
+
+                    let local_available = state.local_playback_target_available();
+                    let receiver_available = state.receiver_playback_target_available();
+
+                    if previous_local_available != local_available {
+                        local_transition_message = Some(playback_target_transition_diagnostic(
+                            &state,
+                            "streaming",
+                            "Local mirror output",
+                            previous_local_target_id.as_deref(),
+                            local_available,
+                        ));
+                        if local_available
+                            && state.streaming.state != synchrosonic_core::StreamSessionState::Idle
+                            && state.streaming.local_mirror.desired_enabled
+                            && state.streaming.local_mirror.state
+                                == synchrosonic_core::LocalMirrorState::Error
+                        {
+                            local_retry_target = Some(previous_local_target_id);
+                        }
+                    }
+
+                    if previous_receiver_available != receiver_available {
+                        receiver_transition_message = Some(playback_target_transition_diagnostic(
+                            &state,
+                            "receiver",
+                            "Receiver output",
+                            previous_receiver_target_id.as_deref(),
+                            receiver_available,
+                        ));
+                    }
+
+                    if targets_changed
+                        || previous_local_available != local_available
+                        || previous_receiver_available != receiver_available
+                    {
+                        refresh_playback_target_selector(
+                            &local_output_selector,
+                            &state,
+                            state.config.audio.local_playback_target_id.as_deref(),
+                            "Local mirror output: system default",
+                        );
+                        refresh_playback_target_selector(
+                            &receiver_output_selector,
+                            &state,
+                            state.config.receiver.playback_target_id.as_deref(),
+                            "Receiver output: system default",
+                        );
+                    }
+                }
+
+                if let Some(target_id) = local_retry_target.flatten() {
+                    let retry_result = sender
+                        .lock()
+                        .expect("sender session mutex")
+                        .set_local_playback_target(Some(target_id.clone()));
+                    let snapshot = sender.lock().expect("sender session mutex").snapshot();
+                    let mut state = state.borrow_mut();
+                    state.apply_streaming_snapshot(snapshot);
+                    match retry_result {
+                        Ok(()) => {
+                            let selected_target = format_selected_playback_target(
+                                &state,
+                                state.config.audio.local_playback_target_id.as_deref(),
+                            );
+                            state.diagnostics.push(DiagnosticEvent::info(
+                                "streaming",
+                                format!(
+                                    "Local mirror output {target_id} is available again; retrying playback on {selected_target}."
+                                ),
+                            ));
+                        }
+                        Err(error) => state.diagnostics.push(DiagnosticEvent::warning(
+                            "streaming",
+                            format!(
+                                "Local mirror output became available again, but restart failed: {error}"
+                            ),
+                        )),
+                    }
+                }
+
+                let snapshot = receiver.lock().expect("receiver runtime mutex").snapshot();
+                {
+                    let mut state = state.borrow_mut();
+                    state.apply_receiver_snapshot(snapshot);
+                    if let Some(message) = local_transition_message {
+                        state.diagnostics.push(message);
+                    }
+                    if let Some(message) = receiver_transition_message {
+                        state.diagnostics.push(message);
+                    }
+                    streaming_status_label.set_text(&format_streaming_status(&state));
+                    receiver_status_label.set_text(&format_receiver_status(&state));
+                    dashboard_status_label.set_text(&format_dashboard_status(
+                        &state,
+                        &audio_backend_name,
+                        &audio_source_summary,
+                    ));
+                }
+            }
+            Err(error) => {
+                let message = format!("PipeWire playback target enumeration failed: {error}");
+                if last_error.as_deref() != Some(message.as_str()) {
+                    state
+                        .borrow_mut()
+                        .diagnostics
+                        .push(DiagnosticEvent::warning("audio", message.clone()));
+                }
+                last_error = Some(message);
+            }
+        }
+
+        ControlFlow::Continue
+    });
+}
+
+fn playback_target_transition_diagnostic(
+    state: &AppState,
+    component: &str,
+    prefix: &str,
+    target_id: Option<&str>,
+    available: bool,
+) -> DiagnosticEvent {
+    let message = format!(
+        "{prefix} is {}: {}.",
+        if available {
+            "available"
+        } else {
+            "currently unavailable"
+        },
+        format_selected_playback_target(state, target_id)
+    );
+
+    if available {
+        DiagnosticEvent::info(component, message)
+    } else {
+        DiagnosticEvent::warning(component, message)
+    }
+}
+
+fn playback_target_id_from_selection(selection_id: &str) -> Option<String> {
+    if selection_id == DEFAULT_PLAYBACK_TARGET_ID {
+        None
+    } else {
+        Some(selection_id.to_string())
+    }
+}
+
+fn refresh_playback_target_selector(
+    selector: &gtk::ComboBoxText,
+    state: &AppState,
+    selected_target_id: Option<&str>,
+    default_label: &str,
+) {
+    selector.remove_all();
+    selector.append(Some(DEFAULT_PLAYBACK_TARGET_ID), default_label);
+
+    for target in &state.playback_targets {
+        let label = format_playback_target_option(target);
+        selector.append(Some(target.id.as_str()), &label);
+    }
+
+    if let Some(selected_target_id) = selected_target_id {
+        if state.playback_target(selected_target_id).is_none() {
+            selector.append(
+                Some(selected_target_id),
+                &format!("{selected_target_id} (currently unavailable)"),
+            );
+        }
+        selector.set_active_id(Some(selected_target_id));
+    } else {
+        selector.set_active_id(Some(DEFAULT_PLAYBACK_TARGET_ID));
+    }
+}
+
+fn format_playback_target_option(target: &PlaybackTarget) -> String {
+    let prefix = match target.kind {
+        PlaybackTargetKind::Bluetooth => "Bluetooth",
+        PlaybackTargetKind::Standard => "Output",
+    };
+    let default_suffix = if target.is_default { " [default]" } else { "" };
+    format!("{prefix}: {}{default_suffix}", target.display_name)
+}
+
+fn format_selected_playback_target(state: &AppState, target_id: Option<&str>) -> String {
+    let Some(target_id) = target_id else {
+        return SYSTEM_DEFAULT_OUTPUT_LABEL.to_string();
+    };
+
+    match state.playback_target(target_id) {
+        Some(target) => match target.kind {
+            PlaybackTargetKind::Bluetooth => format!(
+                "Bluetooth output {}{}",
+                target.display_name,
+                target
+                    .bluetooth_address
+                    .as_deref()
+                    .map(|address| format!(" ({address})"))
+                    .unwrap_or_default()
+            ),
+            PlaybackTargetKind::Standard => format!("output {}", target.display_name),
+        },
+        None => format!("output {target_id} (currently unavailable)"),
+    }
+}
+
 fn format_discovery_devices(state: &AppState) -> String {
     if state.discovered_devices.is_empty() {
         return "No SynchroSonic devices discovered yet.".to_string();
@@ -957,7 +1371,7 @@ fn format_discovery_devices(state: &AppState) -> String {
 fn about_page() -> gtk::Box {
     status_page(
         "About",
-        "SynchroSonic is a Linux-first Rust desktop app for LAN audio streaming. Bluetooth is deferred and will be designed as a later output/backend capability.",
+        "SynchroSonic is a Linux-first Rust desktop app for LAN audio streaming. Bluetooth support is modeled as a local playback-output capability on the sender or receiver device, not as a separate transport path.",
     )
 }
 
@@ -967,8 +1381,13 @@ fn format_dashboard_status(
     audio_source_summary: &str,
 ) -> String {
     let healthy_targets = state.streaming.healthy_target_count();
+    let bluetooth_outputs = state
+        .playback_targets
+        .iter()
+        .filter(|target| target.is_bluetooth())
+        .count();
     format!(
-        "Session: {:?}\nCapture: {:?}\nStreaming: {:?}\nSelected receiver: {}\nTarget sessions: total={} healthy={}\nLocal mirror: desired={} state={:?} buffer={}% ({} / {} packets, dropped={}) played packets={} bytes={} error={}\nSender aggregate metrics: packets sent={} bytes sent={} bitrate={}bps latency={:?}ms gaps={} keepalives={}/{}\nReceiver: {:?}\nReceiver buffer: {}% ({} / {} packets)\nReceiver metrics: packets in={} played={} underruns={} overruns={} reconnects={}\nAudio backend: {}\n{}\nDefault stream port: {}\nLocal playback default: {}",
+        "Session: {:?}\nCapture: {:?}\nStreaming: {:?}\nSelected receiver: {}\nTarget sessions: total={} healthy={}\nPlayback outputs: total={} bluetooth={}\nLocal mirror output: {} (available={})\nReceiver output: {} (available={})\nLocal mirror: desired={} state={:?} buffer={}% ({} / {} packets, dropped={}) played packets={} bytes={} error={}\nSender aggregate metrics: packets sent={} bytes sent={} bitrate={}bps latency={:?}ms gaps={} keepalives={}/{}\nReceiver: {:?}\nReceiver buffer: {}% ({} / {} packets)\nReceiver metrics: packets in={} played={} underruns={} overruns={} reconnects={}\nAudio backend: {}\n{}\nDefault stream port: {}\nLocal playback default: {}",
         state.cast_session,
         state.capture_state,
         state.streaming.state,
@@ -979,6 +1398,12 @@ fn format_dashboard_status(
             .unwrap_or_else(|| "none".to_string()),
         state.streaming.active_target_count(),
         healthy_targets,
+        state.playback_targets.len(),
+        bluetooth_outputs,
+        format_selected_playback_target(state, state.config.audio.local_playback_target_id.as_deref()),
+        state.local_playback_target_available(),
+        format_selected_playback_target(state, state.config.receiver.playback_target_id.as_deref()),
+        state.receiver_playback_target_available(),
         state.streaming.local_mirror.desired_enabled,
         state.streaming.local_mirror.state,
         state.streaming.local_mirror.buffer.fill_percent(),
@@ -1045,23 +1470,22 @@ fn format_streaming_status(state: &AppState) -> String {
     let target_status = format_stream_target_statuses(&stream.targets);
 
     format!(
-        "State: {:?}\nSelected receiver id: {}\nSender session id: {}\nStream: {}\nActive target count: {}\nTargets:\n{}\nLocal mirror: desired={} state={:?} backend={} target={} buffer={}% ({} / {} packets, dropped={}) played packets={} bytes={} error={}\nAggregate metrics: packets sent={} packets received={} bytes sent={} bytes received={} bitrate={}bps latency estimate={:?}ms packet gaps={} keepalives sent={} keepalives received={}\nLast error: {}\nSplit-stream path: PipeWire capture -> explicit branch fan-out -> [per-target bounded network queue -> per-target TCP framed transport -> receiver runtime -> PipeWire playback] + [bounded local mirror queue -> sender-side PipeWire playback].",
+        "State: {:?}\nSelected receiver id: {}\nSender session id: {}\nStream: {}\nActive target count: {}\nTargets:\n{}\nLocal mirror output: {} (available={})\nLocal mirror: desired={} state={:?} backend={} target={} buffer={}% ({} / {} packets, dropped={}) played packets={} bytes={} error={}\nAggregate metrics: packets sent={} packets received={} bytes sent={} bytes received={} bitrate={}bps latency estimate={:?}ms packet gaps={} keepalives sent={} keepalives received={}\nLast error: {}\nSplit-stream path: PipeWire capture -> explicit branch fan-out -> [per-target bounded network queue -> per-target TCP framed transport -> receiver runtime -> PipeWire playback] + [bounded local mirror queue -> sender-side PipeWire playback].",
         stream.state,
         selected_device,
         stream.session_id.as_deref().unwrap_or("not started"),
         stream_shape,
         stream.active_target_count(),
         target_status,
+        format_selected_playback_target(state, state.config.audio.local_playback_target_id.as_deref()),
+        state.local_playback_target_available(),
         local_mirror.desired_enabled,
         local_mirror.state,
         local_mirror
             .playback_backend
             .as_deref()
             .unwrap_or("not configured"),
-        local_mirror
-            .playback_target_id
-            .as_deref()
-            .unwrap_or("default PipeWire sink"),
+        format_selected_playback_target(state, local_mirror.playback_target_id.as_deref()),
         local_mirror.buffer.fill_percent(),
         local_mirror.buffer.queued_packets,
         local_mirror.buffer.max_packets,
@@ -1245,7 +1669,7 @@ fn format_receiver_status(state: &AppState) -> String {
     let last_error = receiver.last_error.as_deref().unwrap_or("none");
 
     format!(
-        "State: {:?}\nAdvertised name: {}\nListen address: {}:{}\nLatency preset: {:?}\nPlayback backend: {}\nPlayback target: {}\nConnection: {}\nBuffer: {} packet(s), {} frame(s), {} ms queued, target {} ms, max {} ms, {}% full\nSync: state={:?} expected={} ms requested={} queued={} ms buffer delta={} ms schedule error={} ms late drops={} resets={} last sender ts={} last sender unix={}\nMetrics: packets in={} frames in={} bytes in={} packets out={} frames out={} bytes out={} underruns={} overruns={} reconnect attempts={}\nLast error: {}\nInternal app flow: use the Start/Stop buttons here; the TCP receiver listener already submits Connected, AudioPacket, KeepAlive, and Disconnected events into the runtime.",
+        "State: {:?}\nAdvertised name: {}\nListen address: {}:{}\nLatency preset: {:?}\nPlayback backend: {}\nPlayback target: {} (available={})\nConnection: {}\nBuffer: {} packet(s), {} frame(s), {} ms queued, target {} ms, max {} ms, {}% full\nSync: state={:?} expected={} ms requested={} queued={} ms buffer delta={} ms schedule error={} ms late drops={} resets={} last sender ts={} last sender unix={}\nMetrics: packets in={} frames in={} bytes in={} packets out={} frames out={} bytes out={} underruns={} overruns={} reconnect attempts={}\nLast error: {}\nInternal app flow: use the Start/Stop buttons here; the TCP receiver listener already submits Connected, AudioPacket, KeepAlive, and Disconnected events into the runtime.",
         receiver.state,
         receiver.advertised_name,
         receiver.bind_host,
@@ -1255,10 +1679,8 @@ fn format_receiver_status(state: &AppState) -> String {
             .playback_backend
             .as_deref()
             .unwrap_or("not configured"),
-        receiver
-            .playback_target_id
-            .as_deref()
-            .unwrap_or("default PipeWire sink"),
+        format_selected_playback_target(state, receiver.playback_target_id.as_deref()),
+        state.receiver_playback_target_available(),
         connection,
         receiver.buffer.queued_packets,
         receiver.buffer.queued_frames,

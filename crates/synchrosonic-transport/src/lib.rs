@@ -380,6 +380,21 @@ mod tests {
         );
     }
 
+    #[test]
+    fn sender_snapshot_tracks_local_mirror_output_selection() {
+        let mut sender =
+            LanSenderSession::new(synchrosonic_core::config::TransportConfig::default());
+
+        sender
+            .set_local_playback_target(Some("bluez_output.11_22_33_44_55_66.a2dp-sink".to_string()))
+            .expect("local mirror target should update");
+
+        assert_eq!(
+            sender.snapshot().local_mirror.playback_target_id.as_deref(),
+            Some("bluez_output.11_22_33_44_55_66.a2dp-sink")
+        );
+    }
+
     struct SpawnedReceiver {
         runtime: Arc<Mutex<ReceiverRuntime>>,
         server: LanReceiverTransportServer,

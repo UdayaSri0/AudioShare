@@ -35,6 +35,8 @@ Each branch has its own queue and worker:
     receiver branches
 - local mirror branch:
   - owns sender-side `pw-play`
+  - can target either the system default PipeWire sink or a selected Bluetooth
+    / non-Bluetooth output sink
   - can be enabled or disabled during an active cast session
   - failures stay local to the mirror branch and do not tear down the network
     stream by themselves

@@ -55,6 +55,25 @@ impl ReceiverRuntime {
                 snapshot
             })
     }
+
+    pub fn set_playback_target(&mut self, target_id: Option<String>) -> Result<(), ReceiverError> {
+        self.config.playback_target_id = target_id.clone();
+
+        if let Some(command_tx) = &self.command_tx {
+            command_tx
+                .send(ReceiverCommand::SetPlaybackTarget(target_id.clone()))
+                .map_err(|_| ReceiverError::ChannelClosed)?;
+        }
+
+        if let Ok(mut snapshot) = self.snapshot.lock() {
+            snapshot.playback_target_id = target_id;
+            if snapshot.state == ReceiverServiceState::Idle {
+                snapshot.last_error = None;
+            }
+        }
+
+        Ok(())
+    }
 }
 
 impl ReceiverService for ReceiverRuntime {
@@ -135,6 +154,7 @@ impl Drop for ReceiverRuntime {
 
 enum ReceiverCommand {
     Transport(ReceiverTransportEvent),
+    SetPlaybackTarget(Option<String>),
     Shutdown,
 }
 
@@ -224,6 +244,53 @@ impl ReceiverWorker {
             }
             ReceiverTransportEvent::Error { message } => {
                 self.set_error(message);
+            }
+        }
+
+        self.sync_snapshot();
+    }
+
+    fn handle_playback_target_change(&mut self, target_id: Option<String>) {
+        self.config.playback_target_id = target_id;
+        self.last_error = None;
+
+        if matches!(self.state, ReceiverServiceState::Error) && self.connection.is_none() {
+            self.state = ReceiverServiceState::Listening;
+        }
+
+        if self.connection.is_some() {
+            let request = PlaybackStartRequest {
+                stream: self
+                    .connection
+                    .as_ref()
+                    .expect("connection should still be present")
+                    .stream
+                    .clone(),
+                target_id: self.config.playback_target_id.clone(),
+                latency_ms: self.buffer_profile.playback_latency_ms,
+            };
+
+            let mut previous_sink = self.playback_sink.take();
+            match self.playback_engine.start_stream(request) {
+                Ok(new_sink) => {
+                    if let Some(mut previous_sink) = previous_sink.take() {
+                        if let Err(error) = previous_sink.stop() {
+                            tracing::warn!(
+                                error = %error,
+                                "failed to stop previous receiver playback sink during target change"
+                            );
+                            self.last_error = Some(error.to_string());
+                        }
+                    }
+                    self.playback_sink = Some(new_sink);
+                    if self.state == ReceiverServiceState::Connected {
+                        self.state = ReceiverServiceState::Buffering;
+                    }
+                }
+                Err(error) => {
+                    self.playback_sink = previous_sink;
+                    self.last_error = Some(error.to_string());
+                }
             }
         }
 
@@ -632,6 +699,9 @@ fn receiver_worker_loop(
     loop {
         match command_rx.recv_timeout(worker.next_wait_duration()) {
             Ok(ReceiverCommand::Transport(event)) => worker.handle_transport_event(event),
+            Ok(ReceiverCommand::SetPlaybackTarget(target_id)) => {
+                worker.handle_playback_target_change(target_id)
+            }
             Ok(ReceiverCommand::Shutdown) => break,
             Err(RecvTimeoutError::Timeout) => worker.on_tick(),
             Err(RecvTimeoutError::Disconnected) => break,
@@ -700,6 +770,23 @@ mod tests {
         runtime.stop().expect("runtime should stop");
         assert_eq!(runtime.state(), ReceiverServiceState::Idle);
         assert_eq!(writes.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn runtime_updates_selected_playback_target_before_start() {
+        let engine = Arc::new(MockPlaybackEngine {
+            writes: Arc::new(AtomicUsize::new(0)),
+        });
+        let mut runtime = ReceiverRuntime::with_playback_engine(ReceiverConfig::default(), engine);
+
+        runtime
+            .set_playback_target(Some("bluez_output.11_22_33_44_55_66.a2dp-sink".to_string()))
+            .expect("playback target should update");
+
+        assert_eq!(
+            runtime.snapshot().playback_target_id.as_deref(),
+            Some("bluez_output.11_22_33_44_55_66.a2dp-sink")
+        );
     }
 
     #[test]

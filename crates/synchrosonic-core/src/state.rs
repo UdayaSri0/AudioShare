@@ -6,7 +6,7 @@ use crate::{
     diagnostics::DiagnosticEvent,
     models::{
         AudioSource, AudioSourceKind, DeviceId, DeviceStatus, DiscoveredDevice, DiscoveryEvent,
-        DiscoverySnapshot,
+        DiscoverySnapshot, PlaybackTarget,
     },
     receiver::ReceiverSnapshot,
     streaming::{LocalMirrorState, StreamSessionSnapshot, StreamSessionState},
@@ -38,6 +38,7 @@ pub struct AppState {
     pub selected_receiver_device_id: Option<DeviceId>,
     pub audio_sources: Vec<AudioSource>,
     pub selected_audio_source_id: Option<String>,
+    pub playback_targets: Vec<PlaybackTarget>,
     pub devices: Vec<DeviceState>,
     pub discovered_devices: Vec<DiscoveredDevice>,
     pub diagnostics: Vec<DiagnosticEvent>,
@@ -48,6 +49,7 @@ impl AppState {
         let receiver = ReceiverSnapshot::from_config(&config.receiver);
         let mut streaming = StreamSessionSnapshot::default();
         streaming.local_mirror.desired_enabled = config.audio.local_playback_enabled;
+        streaming.local_mirror.playback_target_id = config.audio.local_playback_target_id.clone();
         streaming.local_mirror.state = if config.audio.local_playback_enabled {
             LocalMirrorState::Idle
         } else {
@@ -62,6 +64,7 @@ impl AppState {
             capture_state: CaptureState::Idle,
             audio_sources: Vec::new(),
             selected_audio_source_id: None,
+            playback_targets: Vec::new(),
             devices: Vec::new(),
             discovered_devices: Vec::new(),
             diagnostics: vec![DiagnosticEvent::info(
@@ -118,6 +121,44 @@ impl AppState {
                 LocalMirrorState::Disabled
             };
         }
+    }
+
+    pub fn set_playback_targets(&mut self, targets: Vec<PlaybackTarget>) {
+        self.playback_targets = targets;
+    }
+
+    pub fn select_local_playback_target(&mut self, target_id: Option<String>) -> bool {
+        self.config.audio.local_playback_target_id = target_id.clone();
+        self.streaming.local_mirror.playback_target_id = target_id;
+        true
+    }
+
+    pub fn select_receiver_playback_target(&mut self, target_id: Option<String>) -> bool {
+        self.config.receiver.playback_target_id = target_id.clone();
+        self.receiver.playback_target_id = target_id;
+        true
+    }
+
+    pub fn playback_target(&self, target_id: &str) -> Option<&PlaybackTarget> {
+        self.playback_targets
+            .iter()
+            .find(|target| target.id == target_id)
+    }
+
+    pub fn local_playback_target_available(&self) -> bool {
+        self.selected_playback_target_available(
+            self.config.audio.local_playback_target_id.as_deref(),
+        )
+    }
+
+    pub fn receiver_playback_target_available(&self) -> bool {
+        self.selected_playback_target_available(self.config.receiver.playback_target_id.as_deref())
+    }
+
+    pub fn selected_playback_target_available(&self, target_id: Option<&str>) -> bool {
+        target_id
+            .map(|target_id| self.playback_target(target_id).is_some())
+            .unwrap_or(true)
     }
 
     pub fn apply_receiver_snapshot(&mut self, snapshot: ReceiverSnapshot) {
@@ -252,6 +293,7 @@ mod tests {
         assert_eq!(state.diagnostics.len(), 1);
         assert_eq!(state.devices.len(), 0);
         assert_eq!(state.discovered_devices.len(), 0);
+        assert!(state.playback_targets.is_empty());
     }
 
     #[test]
@@ -295,6 +337,32 @@ mod tests {
         assert!(state.config.audio.local_playback_enabled);
         assert!(state.streaming.local_mirror.desired_enabled);
         assert_eq!(state.streaming.local_mirror.state, LocalMirrorState::Idle);
+    }
+
+    #[test]
+    fn playback_target_selection_updates_local_and_receiver_config() {
+        let mut state = AppState::new(AppConfig::default());
+        state.set_playback_targets(vec![PlaybackTarget {
+            id: "bluez_output.11_22_33".to_string(),
+            display_name: "Office Speaker".to_string(),
+            is_default: false,
+            kind: crate::models::PlaybackTargetKind::Bluetooth,
+            availability: crate::models::PlaybackTargetAvailability::Available,
+            bluetooth_address: Some("11:22:33".to_string()),
+        }]);
+
+        assert!(state.select_local_playback_target(Some("bluez_output.11_22_33".to_string())));
+        assert!(state.select_receiver_playback_target(Some("bluez_output.11_22_33".to_string())));
+        assert_eq!(
+            state.config.audio.local_playback_target_id.as_deref(),
+            Some("bluez_output.11_22_33")
+        );
+        assert_eq!(
+            state.config.receiver.playback_target_id.as_deref(),
+            Some("bluez_output.11_22_33")
+        );
+        assert!(state.local_playback_target_available());
+        assert!(state.receiver_playback_target_available());
     }
 
     #[test]

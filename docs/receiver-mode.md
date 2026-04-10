@@ -102,6 +102,11 @@ pw-play --raw --rate <hz> --channels <n> --format <s16|f32> --latency <preset-ms
 That keeps Linux-specific playback logic out of the receiver worker loop while
 still making the runtime testable with a mock playback engine.
 
+The selected receiver playback target can now point at either the system
+default PipeWire sink or a specific enumerated sink, including Bluetooth sinks
+when PipeWire exposes them. The runtime preserves the selected target in its
+snapshot and will use it for the next playback start or target change.
+
 ## Frame Handoff Pipeline
 
 Incoming frames are handed to playback like this:

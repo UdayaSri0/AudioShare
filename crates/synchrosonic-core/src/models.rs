@@ -96,11 +96,34 @@ pub struct AudioSource {
     pub is_default: bool,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PlaybackTargetKind {
+    #[default]
+    Standard,
+    Bluetooth,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PlaybackTargetAvailability {
+    #[default]
+    Available,
+    Unavailable,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlaybackTarget {
     pub id: String,
     pub display_name: String,
     pub is_default: bool,
+    pub kind: PlaybackTargetKind,
+    pub availability: PlaybackTargetAvailability,
+    pub bluetooth_address: Option<String>,
+}
+
+impl PlaybackTarget {
+    pub fn is_bluetooth(&self) -> bool {
+        self.kind == PlaybackTargetKind::Bluetooth
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

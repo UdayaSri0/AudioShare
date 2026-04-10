@@ -57,6 +57,7 @@ impl SenderTarget {
 pub struct LanSenderSession {
     config: TransportConfig,
     playback_engine: Arc<dyn PlaybackEngine>,
+    local_playback_target_id: Option<String>,
     snapshot: Arc<Mutex<StreamSessionSnapshot>>,
     control_tx: Option<Sender<SenderCommand>>,
     worker: Option<JoinHandle<()>>,
@@ -77,6 +78,7 @@ impl LanSenderSession {
         Self {
             config,
             playback_engine,
+            local_playback_target_id: None,
             snapshot: Arc::new(Mutex::new(snapshot)),
             control_tx: None,
             worker: None,
@@ -125,11 +127,13 @@ impl LanSenderSession {
         let snapshot = Arc::clone(&self.snapshot);
         let playback_engine = Arc::clone(&self.playback_engine);
         let initial_target = target.clone();
+        let local_playback_target_id = self.local_playback_target_id.clone();
 
         let mut seeded_snapshot = StreamSessionSnapshot::default();
         seeded_snapshot.session_id = Some(manager_session_id.clone());
         seeded_snapshot.stream = Some(desired_stream.clone());
         seeded_snapshot.local_mirror.desired_enabled = capture_settings.outputs.local_monitoring;
+        seeded_snapshot.local_mirror.playback_target_id = local_playback_target_id.clone();
         seeded_snapshot.local_mirror.state = if capture_settings.outputs.local_monitoring {
             LocalMirrorState::Idle
         } else {
@@ -151,6 +155,7 @@ impl LanSenderSession {
                 capture_settings,
                 sender_name,
                 manager_session_id,
+                local_playback_target_id,
                 snapshot,
                 control_rx,
             );
@@ -194,6 +199,26 @@ impl LanSenderSession {
         Ok(())
     }
 
+    pub fn set_local_playback_target(
+        &mut self,
+        target_id: Option<String>,
+    ) -> Result<(), TransportError> {
+        self.local_playback_target_id = target_id.clone();
+
+        if let Some(control_tx) = &self.control_tx {
+            control_tx
+                .send(SenderCommand::SetLocalMirrorTarget(target_id.clone()))
+                .map_err(|_| TransportError::ChannelClosed)?;
+        }
+
+        if let Ok(mut snapshot) = self.snapshot.lock() {
+            snapshot.local_mirror.playback_target_id = target_id;
+            snapshot.local_mirror.last_error = None;
+        }
+
+        Ok(())
+    }
+
     pub fn stop(&mut self) -> Result<(), TransportError> {
         if let Some(control_tx) = self.control_tx.take() {
             let _ = control_tx.send(SenderCommand::Shutdown);
@@ -223,6 +248,7 @@ enum SenderCommand {
     AddTarget(SenderTarget),
     RemoveTarget(DeviceId),
     SetLocalMirrorEnabled(bool),
+    SetLocalMirrorTarget(Option<String>),
     Shutdown,
 }
 
@@ -770,13 +796,14 @@ where
         capture_settings: CaptureSettings,
         sender_name: String,
         manager_session_id: String,
+        local_playback_target_id: Option<String>,
         snapshot: Arc<Mutex<StreamSessionSnapshot>>,
         control_rx: Receiver<SenderCommand>,
     ) -> Self {
         let stream_config = receiver_stream_config(&capture_settings);
         let local_mirror_request = PlaybackStartRequest {
             stream: stream_config.clone(),
-            target_id: None,
+            target_id: local_playback_target_id.clone(),
             latency_ms: capture_settings.target_latency_ms,
         };
         let local_mirror_branch = LocalMirrorBranch::new(
@@ -801,6 +828,7 @@ where
         shared_snapshot.session_id = Some(manager_session_id);
         shared_snapshot.stream = Some(stream_config.clone());
         shared_snapshot.local_mirror.desired_enabled = capture_settings.outputs.local_monitoring;
+        shared_snapshot.local_mirror.playback_target_id = local_playback_target_id;
         shared_snapshot.local_mirror.state = if capture_settings.outputs.local_monitoring {
             LocalMirrorState::Idle
         } else {
@@ -914,6 +942,21 @@ where
                                 self.shared_snapshot.local_mirror.last_error =
                                     Some(error.to_string());
                             }
+                        }
+                    }
+                }
+                SenderCommand::SetLocalMirrorTarget(target_id) => {
+                    self.local_mirror_request.target_id = target_id.clone();
+                    self.shared_snapshot.local_mirror.playback_target_id = target_id;
+                    self.shared_snapshot.local_mirror.last_error = None;
+                    if self.capture.is_some() && self.shared_snapshot.local_mirror.desired_enabled {
+                        self.shared_snapshot.local_mirror.state = LocalMirrorState::Starting;
+                        if let Err(error) = self
+                            .local_mirror_branch
+                            .start(self.local_mirror_request.clone())
+                        {
+                            self.shared_snapshot.local_mirror.state = LocalMirrorState::Error;
+                            self.shared_snapshot.local_mirror.last_error = Some(error.to_string());
                         }
                     }
                 }

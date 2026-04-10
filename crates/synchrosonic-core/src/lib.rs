@@ -18,7 +18,8 @@ pub use error::{AppError, AudioError, ConfigError, DiscoveryError, ReceiverError
 pub use models::{
     AudioSource, AudioSourceKind, DeviceAvailability, DeviceCapabilities, DeviceId, DeviceRole,
     DeviceStatus, DiscoveredDevice, DiscoveryEvent, DiscoverySnapshot, PlaybackTarget,
-    QualityPreset, TransportEndpoint, DISCOVERY_PROTOCOL_VERSION,
+    PlaybackTargetAvailability, PlaybackTargetKind, QualityPreset, TransportEndpoint,
+    DISCOVERY_PROTOCOL_VERSION,
 };
 pub use receiver::{
     ReceiverAudioPacket, ReceiverBufferSnapshot, ReceiverConnectionInfo, ReceiverLatencyPreset,

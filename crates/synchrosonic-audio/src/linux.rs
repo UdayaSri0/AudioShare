@@ -14,7 +14,7 @@ use serde_json::Value;
 use synchrosonic_core::{
     services::{AudioBackend, AudioCapture},
     AudioError, AudioFrame, AudioSampleFormat, AudioSource, AudioSourceKind, CaptureSettings,
-    CaptureState, CaptureStats, PlaybackTarget,
+    CaptureState, CaptureStats, PlaybackTarget, PlaybackTargetAvailability, PlaybackTargetKind,
 };
 
 impl LinuxAudioBackend {
@@ -487,11 +487,19 @@ fn parse_pipewire_playback_targets(dump: &str) -> Result<Vec<PlaybackTarget>, Au
         let Some(node_name) = prop_str(props, "node.name") else {
             continue;
         };
+        let bluetooth_address = prop_str(props, "api.bluez5.address")
+            .or_else(|| prop_str(props, "device.string"))
+            .filter(|value| value.contains(':'))
+            .map(ToOwned::to_owned);
+        let kind = playback_target_kind(props, node_name, bluetooth_address.as_deref());
 
         targets.push(PlaybackTarget {
             id: node_name.to_string(),
             display_name: display_name(props, node_name),
             is_default: default_sink.as_deref() == Some(node_name),
+            kind,
+            availability: PlaybackTargetAvailability::Available,
+            bluetooth_address,
         });
     }
 
@@ -503,6 +511,27 @@ fn parse_pipewire_playback_targets(dump: &str) -> Result<Vec<PlaybackTarget>, Au
     });
 
     Ok(targets)
+}
+
+fn playback_target_kind(
+    props: &serde_json::Map<String, Value>,
+    node_name: &str,
+    bluetooth_address: Option<&str>,
+) -> PlaybackTargetKind {
+    let device_bus = prop_str(props, "device.bus");
+    let device_api = prop_str(props, "device.api");
+    let factory_name = prop_str(props, "factory.name");
+
+    if bluetooth_address.is_some()
+        || device_bus == Some("bluetooth")
+        || device_api.is_some_and(|api| api.contains("bluez"))
+        || factory_name.is_some_and(|factory| factory.contains("bluez"))
+        || node_name.starts_with("bluez_output.")
+    {
+        PlaybackTargetKind::Bluetooth
+    } else {
+        PlaybackTargetKind::Standard
+    }
 }
 
 fn object_type(object: &Value) -> Option<&str> {
@@ -571,11 +600,27 @@ mod tests {
     fn pipewire_dump_parser_maps_sinks_to_monitor_sources() {
         let sources = parse_pipewire_sources(PIPEWIRE_DUMP_FIXTURE).expect("fixture should parse");
 
-        assert_eq!(sources.len(), 2);
+        assert_eq!(sources.len(), 3);
         assert_eq!(sources[0].kind, AudioSourceKind::Monitor);
         assert_eq!(sources[0].id, "alsa_output.pci.stereo");
         assert!(sources[0].is_default);
-        assert_eq!(sources[1].kind, AudioSourceKind::Microphone);
+        assert_eq!(
+            sources
+                .iter()
+                .filter(|source| source.kind == AudioSourceKind::Monitor)
+                .count(),
+            2
+        );
+        assert_eq!(
+            sources
+                .iter()
+                .filter(|source| source.kind == AudioSourceKind::Microphone)
+                .count(),
+            1
+        );
+        assert!(sources
+            .iter()
+            .any(|source| source.id == "bluez_output.11_22_33_44_55_66.a2dp-sink"));
     }
 
     #[test]
@@ -583,9 +628,15 @@ mod tests {
         let targets =
             parse_pipewire_playback_targets(PIPEWIRE_DUMP_FIXTURE).expect("fixture should parse");
 
-        assert_eq!(targets.len(), 1);
+        assert_eq!(targets.len(), 2);
         assert_eq!(targets[0].id, "alsa_output.pci.stereo");
         assert!(targets[0].is_default);
+        assert_eq!(targets[0].kind, PlaybackTargetKind::Standard);
+        assert_eq!(targets[1].kind, PlaybackTargetKind::Bluetooth);
+        assert_eq!(
+            targets[1].bluetooth_address.as_deref(),
+            Some("11:22:33:44:55:66")
+        );
     }
 
     #[test]
@@ -638,6 +689,20 @@ mod tests {
         "node.name": "alsa_input.pci.mic",
         "node.description": "Built-in Microphone",
         "media.class": "Audio/Source"
+      }
+    }
+  },
+  {
+    "id": 61,
+    "type": "PipeWire:Interface:Node",
+    "info": {
+      "props": {
+        "node.name": "bluez_output.11_22_33_44_55_66.a2dp-sink",
+        "node.description": "Office Bluetooth Speaker",
+        "media.class": "Audio/Sink",
+        "device.bus": "bluetooth",
+        "device.api": "bluez5",
+        "api.bluez5.address": "11:22:33:44:55:66"
       }
     }
   }

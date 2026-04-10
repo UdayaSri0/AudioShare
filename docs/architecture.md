@@ -77,7 +77,15 @@ collection management, and the sender session state snapshot consumed by the UI.
 
 ## Bluetooth Scope
 
-Bluetooth support is intentionally deferred. Bluetooth speakers should not be
-treated as receiver nodes because they cannot run SynchroSonic receiver code.
-Future Bluetooth work should be modeled as an output/backend capability on a
-receiver or local device, not as the first LAN transport.
+Bluetooth support is modeled as a local playback-output capability on the Linux
+device running SynchroSonic. Bluetooth speakers should not be treated as
+receiver nodes because they cannot run SynchroSonic receiver code themselves.
+
+The current implementation keeps the architecture stable:
+
+- LAN/Wi-Fi transport remains the only network streaming path.
+- Bluetooth is only used as a selected PipeWire playback sink for either:
+  - receiver-mode playback on a receiving machine
+  - the sender-side local mirror branch
+- Output detection/classification lives in the Linux audio backend and is
+  surfaced through shared playback-target models in `synchrosonic-core`.

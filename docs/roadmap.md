@@ -59,6 +59,6 @@
 
 ## Deferred: Bluetooth Output Support
 
-- [ ] Model Bluetooth as an output/backend capability.
-- [ ] Avoid adding Bluetooth transport behavior to the LAN MVP.
-- [ ] Document receiver-side Bluetooth sink setup once supported.
+- [x] Model Bluetooth as an output/backend capability.
+- [x] Avoid adding Bluetooth transport behavior to the LAN MVP.
+- [x] Document receiver-side Bluetooth sink setup once supported.

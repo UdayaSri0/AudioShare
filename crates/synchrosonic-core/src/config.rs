@@ -66,6 +66,7 @@ impl AppConfig {
 pub struct AudioConfig {
     pub preferred_source_id: Option<String>,
     pub local_playback_enabled: bool,
+    pub local_playback_target_id: Option<String>,
     pub sample_rate_hz: u32,
     pub channels: u16,
     pub sample_format: AudioSampleFormat,
@@ -78,6 +79,7 @@ impl Default for AudioConfig {
         Self {
             preferred_source_id: None,
             local_playback_enabled: true,
+            local_playback_target_id: None,
             sample_rate_hz: 48_000,
             channels: 2,
             sample_format: AudioSampleFormat::S16Le,

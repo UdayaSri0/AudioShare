@@ -324,10 +324,8 @@ mod tests {
                 "Sender",
             )
             .expect("second target should join active manager");
-        let both_targets_streaming = wait_until(
-            Duration::from_secs(2),
-            Duration::from_millis(25),
-            || {
+        let both_targets_streaming =
+            wait_until(Duration::from_secs(2), Duration::from_millis(25), || {
                 let snapshot = sender.snapshot();
                 snapshot.state == synchrosonic_core::StreamSessionState::Streaming
                     && snapshot.targets.len() == 2
@@ -336,8 +334,7 @@ mod tests {
                     })
                     && receiver_one_bytes.load(Ordering::SeqCst) > 0
                     && receiver_two_bytes.load(Ordering::SeqCst) > 0
-            },
-        );
+            });
         let snapshot = sender.snapshot();
         assert!(
             both_targets_streaming,
@@ -363,17 +360,14 @@ mod tests {
         sender
             .stop_target(&synchrosonic_core::DeviceId::new("receiver-1"))
             .expect("first target should stop independently");
-        let receiver_two_progressed_after_removal = wait_until(
-            Duration::from_secs(2),
-            Duration::from_millis(25),
-            || {
+        let receiver_two_progressed_after_removal =
+            wait_until(Duration::from_secs(2), Duration::from_millis(25), || {
                 let snapshot = sender.snapshot();
                 snapshot.state == synchrosonic_core::StreamSessionState::Streaming
                     && snapshot.targets.len() == 1
                     && snapshot.targets[0].receiver_id.as_str() == "receiver-2"
                     && receiver_two_bytes.load(Ordering::SeqCst) > receiver_two_before
-            },
-        );
+            });
 
         let snapshot_after = sender.snapshot();
         assert!(
@@ -394,16 +388,13 @@ mod tests {
         assert!(receiver_two_bytes.load(Ordering::SeqCst) > receiver_two_before);
 
         let mut receiver_one_last = receiver_one_bytes.load(Ordering::SeqCst);
-        let receiver_one_stabilized = wait_until(
-            Duration::from_secs(1),
-            Duration::from_millis(25),
-            || {
+        let receiver_one_stabilized =
+            wait_until(Duration::from_secs(1), Duration::from_millis(25), || {
                 let current = receiver_one_bytes.load(Ordering::SeqCst);
                 let stabilized = current == receiver_one_last;
                 receiver_one_last = current;
                 stabilized
-            },
-        );
+            });
         let receiver_one_before = receiver_one_bytes.load(Ordering::SeqCst);
         let receiver_one_continued = wait_until(
             Duration::from_millis(250),

@@ -45,6 +45,7 @@ Current release posture:
 - `crates/synchrosonic-transport`: LAN transport session model.
 - `crates/synchrosonic-receiver`: receiver-mode runtime boundary.
 - `docs/architecture.md`: current architecture overview.
+- [docs/developer/README.md](docs/developer/README.md): developer onboarding, local workflow, and CI-aligned checks.
 - `docs/roadmap.md`: phase-by-phase implementation roadmap.
 - `docs/configuration.md`: config schema, persistence, logging, and recovery.
 - `docs/linux-packaging.md`: current Linux packaging assets and remaining gaps.
@@ -52,6 +53,9 @@ Current release posture:
 - `docs/adr/`: architecture decision records.
 
 ## Development Setup
+
+Detailed contributor setup and workflow docs now live in
+[docs/developer/README.md](docs/developer/README.md).
 
 Install Rust and the GTK/libadwaita development packages for your distro. On
 Ubuntu-like systems, the native dependencies are typically:

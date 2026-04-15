@@ -45,6 +45,7 @@ Current release posture:
 - `crates/synchrosonic-transport`: LAN transport session model.
 - `crates/synchrosonic-receiver`: receiver-mode runtime boundary.
 - `docs/architecture.md`: current architecture overview.
+- [docs/quick-start.md](docs/quick-start.md): one simple guide to run the app from source or local build files.
 - [docs/developer/README.md](docs/developer/README.md): developer onboarding, local workflow, and CI-aligned checks.
 - `docs/roadmap.md`: phase-by-phase implementation roadmap.
 - `docs/configuration.md`: config schema, persistence, logging, and recovery.
@@ -53,6 +54,9 @@ Current release posture:
 - `docs/adr/`: architecture decision records.
 
 ## Development Setup
+
+If you want the shortest possible setup and run guide, start with
+[docs/quick-start.md](docs/quick-start.md).
 
 Detailed contributor setup and workflow docs now live in
 [docs/developer/README.md](docs/developer/README.md).

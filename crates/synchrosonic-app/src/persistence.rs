@@ -11,6 +11,11 @@ const APP_DIR_NAME: &str = "synchrosonic";
 const CONFIG_FILE_NAME: &str = "config.toml";
 const PORTABLE_CONFIG_FILE_NAME: &str = "config-export.toml";
 const LOG_FILE_NAME: &str = "app-log.jsonl";
+const DIAGNOSTICS_DIR_NAME: &str = "diagnostics";
+const CRASH_REPORTS_DIR_NAME: &str = "crash-reports";
+const DIAGNOSTIC_BUNDLES_DIR_NAME: &str = "bundles";
+const SESSION_MARKER_FILE_NAME: &str = "session-marker.json";
+const SUBSYSTEM_SNAPSHOT_FILE_NAME: &str = "subsystem-snapshot.json";
 
 #[derive(Debug, Clone)]
 pub struct AppPaths {
@@ -19,6 +24,11 @@ pub struct AppPaths {
     pub config_path: PathBuf,
     pub portable_config_path: PathBuf,
     pub log_path: PathBuf,
+    pub diagnostics_dir: PathBuf,
+    pub crash_reports_dir: PathBuf,
+    pub diagnostic_bundles_dir: PathBuf,
+    pub session_marker_path: PathBuf,
+    pub subsystem_snapshot_path: PathBuf,
 }
 
 #[derive(Debug, Clone)]
@@ -38,14 +48,31 @@ impl AppPaths {
             .map(PathBuf::from)
             .unwrap_or_else(default_state_dir)
             .join(APP_DIR_NAME);
+        let diagnostics_dir = state_dir.join(DIAGNOSTICS_DIR_NAME);
+        let crash_reports_dir = diagnostics_dir.join(CRASH_REPORTS_DIR_NAME);
+        let diagnostic_bundles_dir = diagnostics_dir.join(DIAGNOSTIC_BUNDLES_DIR_NAME);
 
         Self {
             config_path: config_dir.join(CONFIG_FILE_NAME),
             portable_config_path: config_dir.join(PORTABLE_CONFIG_FILE_NAME),
             log_path: state_dir.join(LOG_FILE_NAME),
+            session_marker_path: diagnostics_dir.join(SESSION_MARKER_FILE_NAME),
+            subsystem_snapshot_path: diagnostics_dir.join(SUBSYSTEM_SNAPSHOT_FILE_NAME),
             config_dir,
             state_dir,
+            diagnostics_dir,
+            crash_reports_dir,
+            diagnostic_bundles_dir,
         }
+    }
+
+    pub fn ensure_state_layout(&self) -> Result<(), std::io::Error> {
+        fs::create_dir_all(&self.config_dir)?;
+        fs::create_dir_all(&self.state_dir)?;
+        fs::create_dir_all(&self.diagnostics_dir)?;
+        fs::create_dir_all(&self.crash_reports_dir)?;
+        fs::create_dir_all(&self.diagnostic_bundles_dir)?;
+        Ok(())
     }
 }
 
@@ -222,6 +249,19 @@ mod tests {
             config_path: config_dir.join(CONFIG_FILE_NAME),
             portable_config_path: config_dir.join(PORTABLE_CONFIG_FILE_NAME),
             log_path: state_dir.join(LOG_FILE_NAME),
+            diagnostics_dir: state_dir.join(DIAGNOSTICS_DIR_NAME),
+            crash_reports_dir: state_dir
+                .join(DIAGNOSTICS_DIR_NAME)
+                .join(CRASH_REPORTS_DIR_NAME),
+            diagnostic_bundles_dir: state_dir
+                .join(DIAGNOSTICS_DIR_NAME)
+                .join(DIAGNOSTIC_BUNDLES_DIR_NAME),
+            session_marker_path: state_dir
+                .join(DIAGNOSTICS_DIR_NAME)
+                .join(SESSION_MARKER_FILE_NAME),
+            subsystem_snapshot_path: state_dir
+                .join(DIAGNOSTICS_DIR_NAME)
+                .join(SUBSYSTEM_SNAPSHOT_FILE_NAME),
             config_dir,
             state_dir,
         }
@@ -240,7 +280,9 @@ mod tests {
 
         let paths = AppPaths::resolve();
         assert!(paths.config_path.starts_with(config_root));
-        assert!(paths.log_path.starts_with(state_root));
+        assert!(paths.log_path.starts_with(&state_root));
+        assert!(paths.session_marker_path.starts_with(&state_root));
+        assert!(paths.crash_reports_dir.starts_with(&state_root));
 
         if let Some(previous_config) = previous_config {
             env::set_var("SYNCHROSONIC_CONFIG_DIR", previous_config);

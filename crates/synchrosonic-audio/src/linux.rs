@@ -28,6 +28,18 @@ impl LinuxAudioBackend {
             pw_record_bin: pw_record_bin.into(),
         }
     }
+
+    pub fn list_inventory(&self) -> Result<(Vec<AudioSource>, Vec<PlaybackTarget>), AudioError> {
+        tracing::info!(
+            backend = self.backend_name(),
+            "enumerating PipeWire audio inventory"
+        );
+        let dump = self.pipewire_dump()?;
+        Ok((
+            parse_pipewire_sources(&dump)?,
+            parse_pipewire_playback_targets(&dump)?,
+        ))
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -51,21 +63,11 @@ impl AudioBackend for LinuxAudioBackend {
     }
 
     fn list_sources(&self) -> Result<Vec<AudioSource>, AudioError> {
-        tracing::info!(
-            backend = self.backend_name(),
-            "enumerating PipeWire audio sources"
-        );
-        let dump = self.pipewire_dump()?;
-        parse_pipewire_sources(&dump)
+        self.list_inventory().map(|(sources, _)| sources)
     }
 
     fn list_playback_targets(&self) -> Result<Vec<PlaybackTarget>, AudioError> {
-        tracing::info!(
-            backend = self.backend_name(),
-            "enumerating PipeWire playback targets"
-        );
-        let dump = self.pipewire_dump()?;
-        parse_pipewire_playback_targets(&dump)
+        self.list_inventory().map(|(_, targets)| targets)
     }
 
     fn start_capture(

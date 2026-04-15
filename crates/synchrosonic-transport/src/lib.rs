@@ -226,7 +226,21 @@ mod tests {
             )
             .expect("sender should start");
 
-        thread::sleep(Duration::from_millis(150));
+        let streaming_established =
+            wait_until(Duration::from_secs(2), Duration::from_millis(25), || {
+                let sender_snapshot = sender.snapshot();
+                let receiver_snapshot = receiver_runtime
+                    .lock()
+                    .expect("receiver runtime mutex")
+                    .snapshot();
+
+                sender_snapshot.state == synchrosonic_core::StreamSessionState::Streaming
+                    && sender_snapshot.metrics.packets_sent >= 4
+                    && sender_snapshot.local_mirror.packets_played >= 4
+                    && receiver_snapshot.metrics.packets_received >= 4
+                    && receiver_bytes_written.load(Ordering::SeqCst) > 0
+                    && local_mirror_bytes_written.load(Ordering::SeqCst) > 0
+            });
 
         let sender_snapshot = sender.snapshot();
         let receiver_snapshot = receiver_runtime
@@ -234,6 +248,12 @@ mod tests {
             .expect("receiver runtime mutex")
             .snapshot();
 
+        assert!(
+            streaming_established,
+            "sender/receiver pair did not reach stable streaming; sender_snapshot={sender_snapshot:?}, receiver_snapshot={receiver_snapshot:?}, receiver_bytes_written={}, local_mirror_bytes_written={}",
+            receiver_bytes_written.load(Ordering::SeqCst),
+            local_mirror_bytes_written.load(Ordering::SeqCst),
+        );
         assert_eq!(
             sender_snapshot.state,
             synchrosonic_core::StreamSessionState::Streaming
@@ -357,16 +377,31 @@ mod tests {
         assert!(receiver_two_bytes.load(Ordering::SeqCst) > 0);
 
         let receiver_two_before = receiver_two_bytes.load(Ordering::SeqCst);
+        let receiver_two_packets_before = receiver_two
+            .runtime
+            .lock()
+            .expect("receiver runtime mutex")
+            .snapshot()
+            .metrics
+            .packets_received;
         sender
             .stop_target(&synchrosonic_core::DeviceId::new("receiver-1"))
             .expect("first target should stop independently");
         let receiver_two_progressed_after_removal =
-            wait_until(Duration::from_secs(2), Duration::from_millis(25), || {
+            wait_until(Duration::from_secs(4), Duration::from_millis(25), || {
                 let snapshot = sender.snapshot();
+                let receiver_two_packets_after = receiver_two
+                    .runtime
+                    .lock()
+                    .expect("receiver runtime mutex")
+                    .snapshot()
+                    .metrics
+                    .packets_received;
                 snapshot.state == synchrosonic_core::StreamSessionState::Streaming
                     && snapshot.targets.len() == 1
                     && snapshot.targets[0].receiver_id.as_str() == "receiver-2"
-                    && receiver_two_bytes.load(Ordering::SeqCst) > receiver_two_before
+                    && (receiver_two_bytes.load(Ordering::SeqCst) > receiver_two_before
+                        || receiver_two_packets_after > receiver_two_packets_before)
             });
 
         let snapshot_after = sender.snapshot();

@@ -21,6 +21,7 @@ unless a page says otherwise.
 - [Testing](./testing.md)
 - [Linting And Checks](./linting-and-checks.md)
 - [Build And Release](./build-and-release.md)
+- [Diagnostics And Crash Reports](./diagnostics-and-crash-reports.md)
 - [Troubleshooting](./troubleshooting.md)
 - [Contributing Workflow](./contributing-workflow.md)
 

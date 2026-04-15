@@ -63,6 +63,12 @@ impl LogStore {
             .unwrap_or_default()
     }
 
+    pub fn snapshot_recent_chronological(&self, limit: usize) -> Vec<StructuredLogEntry> {
+        let mut entries = self.snapshot_recent(limit);
+        entries.reverse();
+        entries
+    }
+
     fn push(&self, entry: StructuredLogEntry) {
         if let Ok(mut entries) = self.entries.lock() {
             entries.push_back(entry);
@@ -73,31 +79,37 @@ impl LogStore {
     }
 
     fn hydrate_from_file(&self, path: &Path, limit: usize) -> Result<(), std::io::Error> {
-        if !path.exists() {
-            return Ok(());
-        }
-
-        let reader = BufReader::new(File::open(path)?);
-        let mut tail = VecDeque::with_capacity(limit);
-        for line in reader.lines() {
-            let line = line?;
-            if line.trim().is_empty() {
-                continue;
-            }
-            if let Ok(entry) = serde_json::from_str::<StructuredLogEntry>(&line) {
-                tail.push_back(entry);
-                while tail.len() > limit {
-                    tail.pop_front();
-                }
-            }
-        }
+        let tail = read_log_tail(path, limit)?;
 
         if let Ok(mut entries) = self.entries.lock() {
-            *entries = tail;
+            *entries = tail.into_iter().collect();
         }
 
         Ok(())
     }
+}
+
+pub fn read_log_tail(path: &Path, limit: usize) -> Result<Vec<StructuredLogEntry>, std::io::Error> {
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+
+    let reader = BufReader::new(File::open(path)?);
+    let mut tail = VecDeque::with_capacity(limit);
+    for line in reader.lines() {
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        if let Ok(entry) = serde_json::from_str::<StructuredLogEntry>(&line) {
+            tail.push_back(entry);
+            while tail.len() > limit {
+                tail.pop_front();
+            }
+        }
+    }
+
+    Ok(tail.into_iter().collect())
 }
 
 impl Default for LogStore {

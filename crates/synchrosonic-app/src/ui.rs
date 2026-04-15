@@ -2,8 +2,15 @@ use std::{
     cell::{Cell, RefCell},
     collections::HashMap,
     net::SocketAddr,
+    panic::{catch_unwind, AssertUnwindSafe},
     rc::Rc,
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc::{self, TryRecvError},
+        Arc, Mutex,
+    },
+    thread,
+    time::Instant,
 };
 
 use adw::prelude::*;
@@ -22,6 +29,7 @@ use synchrosonic_receiver::ReceiverRuntime;
 use synchrosonic_transport::{LanReceiverTransportServer, LanSenderSession, SenderTarget};
 
 use crate::{
+    diagnostics::{DiagnosticsRuntime, PollKind, PollObservation, RuntimeStateView},
     logging::{LogStore, StructuredLogEntry},
     metadata,
     persistence::{export_config, import_config, save_active_config, AppPaths},
@@ -35,6 +43,10 @@ const QUALITY_HIGH_QUALITY_ID: &str = "quality_high_quality";
 const LATENCY_LOW_ID: &str = "latency_low";
 const LATENCY_BALANCED_ID: &str = "latency_balanced";
 const LATENCY_STABLE_ID: &str = "latency_stable";
+const DISCOVERY_POLL_INTERVAL_SECS: u64 = 1;
+const RECEIVER_POLL_INTERVAL_SECS: u64 = 1;
+const STREAMING_POLL_INTERVAL_SECS: u64 = 1;
+const AUDIO_INVENTORY_POLL_INTERVAL_SECS: u64 = 8;
 
 #[derive(Clone)]
 pub struct UiLaunchContext {
@@ -42,6 +54,7 @@ pub struct UiLaunchContext {
     pub startup_diagnostics: Vec<DiagnosticEvent>,
     pub paths: AppPaths,
     pub log_store: LogStore,
+    pub diagnostics_runtime: DiagnosticsRuntime,
 }
 
 #[derive(Clone)]
@@ -49,6 +62,11 @@ struct UiContext {
     audio_backend_name: String,
     discovery_service_type: String,
     discovery_started: bool,
+}
+
+struct AudioInventoryRefreshResult {
+    result: Result<(Vec<AudioSource>, Vec<PlaybackTarget>), synchrosonic_core::AudioError>,
+    duration_ms: u64,
 }
 
 #[derive(Clone, Default)]
@@ -68,6 +86,7 @@ struct UiController {
     context: UiContext,
     paths: AppPaths,
     log_store: LogStore,
+    diagnostics_runtime: DiagnosticsRuntime,
     refresh_guards: UiRefreshGuards,
 }
 
@@ -143,6 +162,11 @@ struct ReceiverWidgets {
 struct DiagnosticsWidgets {
     summary_row: adw::ActionRow,
     log_summary_row: adw::ActionRow,
+    copy_button: gtk::Button,
+    export_bundle_button: gtk::Button,
+    open_diagnostics_button: gtk::Button,
+    open_crash_reports_button: gtk::Button,
+    copy_latest_crash_button: gtk::Button,
     clear_button: gtk::Button,
     list_box: gtk::ListBox,
     empty_state: adw::StatusPage,
@@ -296,6 +320,7 @@ pub fn build_main_window(app: &adw::Application, launch: UiLaunchContext) {
         },
         paths: launch.paths.clone(),
         log_store: launch.log_store.clone(),
+        diagnostics_runtime: launch.diagnostics_runtime.clone(),
         refresh_guards: UiRefreshGuards::default(),
     };
 
@@ -412,6 +437,9 @@ fn persist_current_config(
     success_message: Option<String>,
 ) {
     let config = controller.state.borrow().config.clone();
+    controller
+        .diagnostics_runtime
+        .update_config_summary(&config);
     match save_active_config(&controller.paths, &config) {
         Ok(path) => {
             if let Some(success_message) = success_message {
@@ -934,16 +962,248 @@ fn connect_settings_controls(controller: &UiController) {
 }
 
 fn connect_diagnostics_controls(controller: &UiController) {
-    let controller = controller.clone();
-    let clear_button = controller.widgets.diagnostics.clear_button.clone();
-    clear_button.connect_clicked(move |_| {
-        controller.state.borrow_mut().clear_diagnostics();
-        refresh_ui(&controller);
+    {
+        let controller = controller.clone();
+        let copy_button = controller.widgets.diagnostics.copy_button.clone();
+        copy_button.connect_clicked(move |_| {
+            guarded_ui_callback(&controller, "copy-diagnostics", || {
+                let report = {
+                    let state = controller.state.borrow();
+                    controller
+                        .diagnostics_runtime
+                        .build_compact_diagnostics_report(&state, &controller.paths)
+                };
+                let message = match copy_text_to_clipboard(&report) {
+                    Ok(()) => DiagnosticEvent::info(
+                        "diagnostics",
+                        "Copied the current diagnostics summary to the clipboard.",
+                    ),
+                    Err(error) => DiagnosticEvent::warning(
+                        "diagnostics",
+                        format!("Copying diagnostics to the clipboard failed: {error}"),
+                    ),
+                };
+                controller.state.borrow_mut().diagnostics.push(message);
+                refresh_ui(&controller);
+            });
+        });
+    }
+
+    {
+        let controller = controller.clone();
+        let export_bundle_button = controller.widgets.diagnostics.export_bundle_button.clone();
+        export_bundle_button.connect_clicked(move |_| {
+            guarded_ui_callback(&controller, "export-diagnostic-bundle", || {
+                let state = controller.state.borrow().clone();
+                let message = match controller
+                    .diagnostics_runtime
+                    .export_diagnostic_bundle(&state)
+                {
+                    Ok(path) => DiagnosticEvent::info(
+                        "diagnostics",
+                        format!("Exported a diagnostic bundle to {}.", path.display()),
+                    ),
+                    Err(error) => DiagnosticEvent::error(
+                        "diagnostics",
+                        format!("Diagnostic bundle export failed: {error}"),
+                    ),
+                };
+                controller.state.borrow_mut().diagnostics.push(message);
+                refresh_ui(&controller);
+            });
+        });
+    }
+
+    {
+        let controller = controller.clone();
+        let open_button = controller
+            .widgets
+            .diagnostics
+            .open_diagnostics_button
+            .clone();
+        open_button.connect_clicked(move |_| {
+            guarded_ui_callback(&controller, "open-diagnostics-folder", || {
+                let message = match open_path_in_default_app(&controller.paths.diagnostics_dir) {
+                    Ok(()) => DiagnosticEvent::info(
+                        "diagnostics",
+                        format!(
+                            "Opened the diagnostics folder at {}.",
+                            controller.paths.diagnostics_dir.display()
+                        ),
+                    ),
+                    Err(error) => DiagnosticEvent::warning(
+                        "diagnostics",
+                        format!(
+                            "Opening the diagnostics folder {} failed: {error}",
+                            controller.paths.diagnostics_dir.display()
+                        ),
+                    ),
+                };
+                controller.state.borrow_mut().diagnostics.push(message);
+                refresh_ui(&controller);
+            });
+        });
+    }
+
+    {
+        let controller = controller.clone();
+        let open_button = controller
+            .widgets
+            .diagnostics
+            .open_crash_reports_button
+            .clone();
+        open_button.connect_clicked(move |_| {
+            guarded_ui_callback(&controller, "open-crash-reports-folder", || {
+                let message = match open_path_in_default_app(&controller.paths.crash_reports_dir) {
+                    Ok(()) => DiagnosticEvent::info(
+                        "diagnostics",
+                        format!(
+                            "Opened the crash reports folder at {}.",
+                            controller.paths.crash_reports_dir.display()
+                        ),
+                    ),
+                    Err(error) => DiagnosticEvent::warning(
+                        "diagnostics",
+                        format!(
+                            "Opening the crash reports folder {} failed: {error}",
+                            controller.paths.crash_reports_dir.display()
+                        ),
+                    ),
+                };
+                controller.state.borrow_mut().diagnostics.push(message);
+                refresh_ui(&controller);
+            });
+        });
+    }
+
+    {
+        let controller = controller.clone();
+        let copy_button = controller
+            .widgets
+            .diagnostics
+            .copy_latest_crash_button
+            .clone();
+        copy_button.connect_clicked(move |_| {
+            guarded_ui_callback(&controller, "copy-latest-crash-report", || {
+                let message = match controller.diagnostics_runtime.latest_crash_report_text() {
+                    Ok(Some(report)) => match copy_text_to_clipboard(&report) {
+                        Ok(()) => DiagnosticEvent::info(
+                            "diagnostics",
+                            "Copied the latest crash report to the clipboard.",
+                        ),
+                        Err(error) => DiagnosticEvent::warning(
+                            "diagnostics",
+                            format!("Copying the latest crash report failed: {error}"),
+                        ),
+                    },
+                    Ok(None) => DiagnosticEvent::warning(
+                        "diagnostics",
+                        "No crash reports are available yet.",
+                    ),
+                    Err(error) => DiagnosticEvent::warning(
+                        "diagnostics",
+                        format!("Reading the latest crash report failed: {error}"),
+                    ),
+                };
+                controller.state.borrow_mut().diagnostics.push(message);
+                refresh_ui(&controller);
+            });
+        });
+    }
+
+    {
+        let controller = controller.clone();
+        let clear_button = controller.widgets.diagnostics.clear_button.clone();
+        clear_button.connect_clicked(move |_| {
+            guarded_ui_callback(&controller, "clear-diagnostics", || {
+                controller.state.borrow_mut().clear_diagnostics();
+                refresh_ui(&controller);
+            });
+        });
+    }
+}
+
+fn copy_text_to_clipboard(text: &str) -> Result<(), String> {
+    let Some(display) = gtk::gdk::Display::default() else {
+        return Err("no GTK display is available".to_string());
+    };
+    display.clipboard().set_text(text);
+    Ok(())
+}
+
+fn open_path_in_default_app(path: &std::path::Path) -> Result<(), String> {
+    let uri = gtk::gio::File::for_path(path).uri();
+    gtk::gio::AppInfo::launch_default_for_uri(&uri, None::<&gtk::gio::AppLaunchContext>)
+        .map_err(|error| error.to_string())
+}
+
+fn guarded_ui_callback<F>(controller: &UiController, callback_name: &'static str, callback: F)
+where
+    F: FnOnce(),
+{
+    let _ = guarded_timeout_callback(controller, callback_name, || {
+        callback();
+        ControlFlow::Continue
     });
 }
 
+fn guarded_timeout_callback<F>(
+    controller: &UiController,
+    callback_name: &'static str,
+    callback: F,
+) -> ControlFlow
+where
+    F: FnOnce() -> ControlFlow,
+{
+    match catch_unwind(AssertUnwindSafe(callback)) {
+        Ok(flow) => flow,
+        Err(payload) => {
+            let panic_message = if let Some(message) = payload.downcast_ref::<&str>() {
+                (*message).to_string()
+            } else if let Some(message) = payload.downcast_ref::<String>() {
+                message.clone()
+            } else {
+                "unknown panic payload".to_string()
+            };
+            tracing::error!(
+                callback = callback_name,
+                panic = %panic_message,
+                "UI callback panicked"
+            );
+            controller
+                .diagnostics_runtime
+                .queue_diagnostic_event(DiagnosticEvent::error(
+                    "ui",
+                    format!("UI callback {callback_name} panicked: {panic_message}"),
+                ));
+            refresh_ui(controller);
+            ControlFlow::Continue
+        }
+    }
+}
+
 fn refresh_ui(controller: &UiController) {
+    let pending_events = controller.diagnostics_runtime.drain_pending_events();
+    if !pending_events.is_empty() {
+        controller
+            .state
+            .borrow_mut()
+            .diagnostics
+            .extend(pending_events);
+    }
     let state = controller.state.borrow().clone();
+    let current_view_name = controller
+        .navigation
+        .visible_child_name()
+        .map(|name| name.to_string())
+        .unwrap_or_else(|| "dashboard".to_string());
+    controller.diagnostics_runtime.update_snapshot_from_state(
+        &state,
+        &RuntimeStateView {
+            current_view_name,
+            discovery_started: controller.context.discovery_started,
+        },
+    );
     refresh_dashboard(controller, &state);
     refresh_discovery_page(controller, &state);
     refresh_casting_page(controller, &state);
@@ -2192,8 +2452,23 @@ fn diagnostics_page() -> (gtk::ScrolledWindow, DiagnosticsWidgets) {
     summary_group.add(&log_summary_row);
     content.append(&summary_group);
 
+    let actions_section = section_box("Diagnostic actions");
+    let actions = gtk::Box::new(Orientation::Vertical, 12);
+    let copy_button = gtk::Button::with_label("Copy diagnostics");
+    copy_button.add_css_class("suggested-action");
+    let export_bundle_button = gtk::Button::with_label("Export diagnostic bundle");
+    let open_diagnostics_button = gtk::Button::with_label("Open diagnostics folder");
+    let open_crash_reports_button = gtk::Button::with_label("Open crash reports folder");
+    let copy_latest_crash_button = gtk::Button::with_label("Copy latest crash report");
     let clear_button = gtk::Button::with_label("Clear diagnostics");
-    content.append(&clear_button);
+    actions.append(&copy_button);
+    actions.append(&export_bundle_button);
+    actions.append(&open_diagnostics_button);
+    actions.append(&open_crash_reports_button);
+    actions.append(&copy_latest_crash_button);
+    actions.append(&clear_button);
+    actions_section.append(&actions);
+    content.append(&actions_section);
 
     let diagnostics_section = section_box("Recent events");
     let diagnostics_empty_state = empty_state(
@@ -2222,6 +2497,11 @@ fn diagnostics_page() -> (gtk::ScrolledWindow, DiagnosticsWidgets) {
         DiagnosticsWidgets {
             summary_row: diagnostic_summary_row,
             log_summary_row,
+            copy_button,
+            export_bundle_button,
+            open_diagnostics_button,
+            open_crash_reports_button,
+            copy_latest_crash_button,
             clear_button,
             list_box,
             empty_state: diagnostics_empty_state,
@@ -2463,73 +2743,88 @@ fn empty_state(title: &str, description: &str, icon_name: &str) -> adw::StatusPa
 }
 
 fn start_discovery_poll(mut discovery: MdnsDiscoveryService, controller: UiController) {
-    glib::timeout_add_seconds_local(1, move || {
-        let previous_discovered_devices = {
-            let state = controller.state.borrow();
-            effective_discovered_devices(&state.discovered_devices)
-        };
-        let previous_selected_receiver = controller
-            .state
-            .borrow()
-            .selected_receiver_device_id
-            .clone();
-        let mut should_refresh = false;
+    glib::timeout_add_seconds_local(DISCOVERY_POLL_INTERVAL_SECS as u32, move || {
+        guarded_timeout_callback(&controller, "discovery-poll", || {
+            let started = Instant::now();
+            let previous_discovered_devices = {
+                let state = controller.state.borrow();
+                effective_discovered_devices(&state.discovered_devices)
+            };
+            let previous_selected_receiver = controller
+                .state
+                .borrow()
+                .selected_receiver_device_id
+                .clone();
+            let mut should_refresh = false;
+            let mut changes_applied = 0_usize;
+            let mut poll_error = None::<String>;
 
-        loop {
-            match discovery.poll_event() {
-                Ok(Some(event)) => controller.state.borrow_mut().apply_discovery_event(event),
-                Ok(None) => break,
+            loop {
+                match discovery.poll_event() {
+                    Ok(Some(event)) => {
+                        controller.state.borrow_mut().apply_discovery_event(event);
+                        changes_applied += 1;
+                        should_refresh = true;
+                    }
+                    Ok(None) => break,
+                    Err(error) => {
+                        poll_error = Some(error.to_string());
+                        controller
+                            .state
+                            .borrow_mut()
+                            .diagnostics
+                            .push(DiagnosticEvent::warning(
+                                "discovery",
+                                format!("mDNS discovery event error: {error}"),
+                            ));
+                        should_refresh = true;
+                        changes_applied += 1;
+                        break;
+                    }
+                }
+            }
+
+            match discovery.prune_stale() {
+                Ok(events) => {
+                    changes_applied += events.len();
+                    for event in events {
+                        controller.state.borrow_mut().apply_discovery_event(event);
+                    }
+                    should_refresh |= changes_applied > 0;
+                }
                 Err(error) => {
+                    poll_error = Some(error.to_string());
                     controller
                         .state
                         .borrow_mut()
                         .diagnostics
                         .push(DiagnosticEvent::warning(
                             "discovery",
-                            format!("mDNS discovery event error: {error}"),
+                            format!("mDNS stale pruning failed: {error}"),
                         ));
                     should_refresh = true;
-                    break;
+                    changes_applied += 1;
                 }
             }
-        }
 
-        match discovery.prune_stale() {
-            Ok(events) => {
-                for event in events {
-                    controller.state.borrow_mut().apply_discovery_event(event);
-                }
-            }
-            Err(error) => {
-                controller
-                    .state
-                    .borrow_mut()
-                    .diagnostics
-                    .push(DiagnosticEvent::warning(
-                        "discovery",
-                        format!("mDNS stale pruning failed: {error}"),
-                    ));
+            let snapshot = discovery.snapshot();
+            let current_discovered_devices = effective_discovered_devices(&snapshot.devices);
+            if previous_discovered_devices != current_discovered_devices {
                 should_refresh = true;
+                changes_applied += 1;
             }
-        }
 
-        let snapshot = discovery.snapshot();
-        let current_discovered_devices = effective_discovered_devices(&snapshot.devices);
-        if previous_discovered_devices != current_discovered_devices {
-            should_refresh = true;
-        }
-
-        controller
-            .state
-            .borrow_mut()
-            .apply_discovery_snapshot(snapshot);
-        let current_selected_receiver = controller
-            .state
-            .borrow()
-            .selected_receiver_device_id
-            .clone();
-        if previous_selected_receiver != current_selected_receiver {
-            let message = match (previous_selected_receiver, current_selected_receiver) {
+            controller
+                .state
+                .borrow_mut()
+                .apply_discovery_snapshot(snapshot);
+            let current_selected_receiver = controller
+                .state
+                .borrow()
+                .selected_receiver_device_id
+                .clone();
+            if previous_selected_receiver != current_selected_receiver {
+                let message = match (previous_selected_receiver, current_selected_receiver) {
                 (Some(previous), Some(current)) => Some(DiagnosticEvent::warning(
                     "discovery",
                     format!(
@@ -2546,380 +2841,640 @@ fn start_discovery_poll(mut discovery: MdnsDiscoveryService, controller: UiContr
                 )),
                 _ => None,
             };
-            if let Some(message) = message {
-                controller.state.borrow_mut().diagnostics.push(message);
-                should_refresh = true;
+                if let Some(message) = message {
+                    controller.state.borrow_mut().diagnostics.push(message);
+                    should_refresh = true;
+                    changes_applied += 1;
+                }
             }
-        }
 
-        if should_refresh {
-            refresh_ui(&controller);
-        }
-        ControlFlow::Continue
+            let duration_ms = elapsed_ms(started);
+            controller.diagnostics_runtime.note_poll(
+                PollKind::Discovery,
+                PollObservation {
+                    interval_secs: DISCOVERY_POLL_INTERVAL_SECS,
+                    duration_ms,
+                    skipped: false,
+                    changes_applied,
+                    error: poll_error.clone(),
+                },
+            );
+            tracing::debug!(
+                poll = "discovery",
+                interval_secs = DISCOVERY_POLL_INTERVAL_SECS,
+                duration_ms,
+                skipped = false,
+                changes_applied,
+                error = ?poll_error,
+                "completed discovery refresh"
+            );
+            if should_refresh {
+                refresh_ui(&controller);
+            }
+            ControlFlow::Continue
+        })
     });
 }
 
 fn start_receiver_poll(controller: UiController) {
-    glib::timeout_add_seconds_local(1, move || {
-        let snapshot = controller
-            .receiver
-            .lock()
-            .expect("receiver runtime mutex")
-            .snapshot();
-        let transport_snapshot = controller
-            .receiver_transport
-            .lock()
-            .expect("receiver transport mutex")
-            .snapshot();
+    glib::timeout_add_seconds_local(RECEIVER_POLL_INTERVAL_SECS as u32, move || {
+        guarded_timeout_callback(&controller, "receiver-poll", || {
+            let started = Instant::now();
+            let snapshot = controller
+                .receiver
+                .lock()
+                .expect("receiver runtime mutex")
+                .snapshot();
+            let transport_snapshot = controller
+                .receiver_transport
+                .lock()
+                .expect("receiver transport mutex")
+                .snapshot();
+            let previous_transport_error = controller
+                .diagnostics_runtime
+                .snapshot()
+                .receiver
+                .last_transport_error;
+            controller
+                .diagnostics_runtime
+                .update_receiver_listener_snapshot(
+                    transport_snapshot.bind_addr.to_string(),
+                    transport_snapshot.active,
+                    transport_snapshot.last_error.clone(),
+                );
+            let mut should_refresh = false;
+            let mut changes_applied = 0_usize;
+            let mut poll_error = None::<String>;
 
-        {
-            let mut state = controller.state.borrow_mut();
-            let state_changed = state.receiver.state != snapshot.state;
-            let last_error_changed = state.receiver.last_error != snapshot.last_error;
-            let sync_state_changed = state.receiver.sync.state != snapshot.sync.state;
-            let late_drop_delta = snapshot
-                .sync
-                .late_packet_drops
-                .saturating_sub(state.receiver.sync.late_packet_drops);
-            let sync_state = snapshot.sync.state;
-            let sync_buffer_delta_ms = snapshot.sync.buffer_delta_ms;
-            let sync_schedule_error_ms = snapshot.sync.schedule_error_ms;
-            let sync_expected_latency_ms = snapshot.sync.expected_output_latency_ms;
-            let sync_queued_audio_ms = snapshot.sync.queued_audio_ms;
-            let state_message = if state_changed {
-                Some(format!("Receiver state is now {:?}", snapshot.state))
-            } else {
-                None
-            };
-            let error_message = if last_error_changed {
-                snapshot
-                    .last_error
-                    .as_ref()
-                    .map(|error| format!("Receiver runtime reported: {error}"))
-            } else {
-                None
-            };
-            state.apply_receiver_snapshot(snapshot);
+            {
+                let mut state = controller.state.borrow_mut();
+                let state_changed = state.receiver.state != snapshot.state;
+                let last_error_changed = state.receiver.last_error != snapshot.last_error;
+                let sync_state_changed = state.receiver.sync.state != snapshot.sync.state;
+                let late_drop_delta = snapshot
+                    .sync
+                    .late_packet_drops
+                    .saturating_sub(state.receiver.sync.late_packet_drops);
+                let sync_state = snapshot.sync.state;
+                let sync_buffer_delta_ms = snapshot.sync.buffer_delta_ms;
+                let sync_schedule_error_ms = snapshot.sync.schedule_error_ms;
+                let sync_expected_latency_ms = snapshot.sync.expected_output_latency_ms;
+                let sync_queued_audio_ms = snapshot.sync.queued_audio_ms;
+                let state_message = if state_changed {
+                    Some(format!("Receiver state is now {:?}", snapshot.state))
+                } else {
+                    None
+                };
+                let error_message = if last_error_changed {
+                    snapshot
+                        .last_error
+                        .as_ref()
+                        .map(|error| format!("Receiver runtime reported: {error}"))
+                } else {
+                    None
+                };
+                state.apply_receiver_snapshot(snapshot);
 
-            if let Some(message) = state_message {
-                state
-                    .diagnostics
-                    .push(DiagnosticEvent::info("receiver", message));
-            }
-            if sync_state_changed {
-                let sync_event = match sync_state {
-                    synchrosonic_core::ReceiverSyncState::Late
-                    | synchrosonic_core::ReceiverSyncState::Recovering => DiagnosticEvent::warning(
-                        "receiver-sync",
-                        format!(
+                if let Some(message) = state_message {
+                    state
+                        .diagnostics
+                        .push(DiagnosticEvent::info("receiver", message));
+                }
+                if sync_state_changed {
+                    let sync_event = match sync_state {
+                        synchrosonic_core::ReceiverSyncState::Late
+                        | synchrosonic_core::ReceiverSyncState::Recovering => {
+                            DiagnosticEvent::warning(
+                                "receiver-sync",
+                                format!(
                             "Receiver sync is now {:?} (buffer delta {} ms, schedule error {} ms).",
                             sync_state, sync_buffer_delta_ms, sync_schedule_error_ms
                         ),
-                    ),
-                    _ => DiagnosticEvent::info(
+                            )
+                        }
+                        _ => DiagnosticEvent::info(
+                            "receiver-sync",
+                            format!(
+                                "Receiver sync is now {:?} (expected {} ms, queued {} ms).",
+                                sync_state, sync_expected_latency_ms, sync_queued_audio_ms
+                            ),
+                        ),
+                    };
+                    state.diagnostics.push(sync_event);
+                }
+                if late_drop_delta > 0 {
+                    state.diagnostics.push(DiagnosticEvent::warning(
                         "receiver-sync",
                         format!(
-                            "Receiver sync is now {:?} (expected {} ms, queued {} ms).",
-                            sync_state, sync_expected_latency_ms, sync_queued_audio_ms
+                            "Receiver dropped {late_drop_delta} stale packet(s) to recover sync."
                         ),
-                    ),
-                };
-                state.diagnostics.push(sync_event);
-            }
-            if late_drop_delta > 0 {
-                state.diagnostics.push(DiagnosticEvent::warning(
-                    "receiver-sync",
-                    format!("Receiver dropped {late_drop_delta} stale packet(s) to recover sync."),
-                ));
-            }
-            if let Some(message) = error_message {
-                state
-                    .diagnostics
-                    .push(DiagnosticEvent::warning("receiver", message));
-            }
-            if let Some(error) = &transport_snapshot.last_error {
-                if state.diagnostics.last().map(|event| event.message.as_str())
-                    != Some(error.as_str())
-                {
-                    state.diagnostics.push(DiagnosticEvent::warning(
-                        "receiver-transport",
-                        format!("Receiver TCP listener reported: {error}"),
                     ));
                 }
+                if let Some(message) = error_message {
+                    state
+                        .diagnostics
+                        .push(DiagnosticEvent::warning("receiver", message));
+                }
+                if previous_transport_error != transport_snapshot.last_error {
+                    changes_applied += 1;
+                    should_refresh = true;
+                }
+                if let Some(error) = &transport_snapshot.last_error {
+                    poll_error = Some(error.clone());
+                    if state.diagnostics.last().map(|event| event.message.as_str())
+                        != Some(error.as_str())
+                    {
+                        state.diagnostics.push(DiagnosticEvent::warning(
+                            "receiver-transport",
+                            format!("Receiver TCP listener reported: {error}"),
+                        ));
+                        changes_applied += 1;
+                        should_refresh = true;
+                    }
+                }
+                if state_changed {
+                    changes_applied += 1;
+                    should_refresh = true;
+                }
+                if last_error_changed {
+                    changes_applied += 1;
+                    should_refresh = true;
+                }
+                if sync_state_changed {
+                    changes_applied += 1;
+                    should_refresh = true;
+                }
+                if late_drop_delta > 0 {
+                    changes_applied += late_drop_delta as usize;
+                    should_refresh = true;
+                }
             }
-        }
 
-        refresh_ui(&controller);
-        ControlFlow::Continue
+            let duration_ms = elapsed_ms(started);
+            controller.diagnostics_runtime.note_poll(
+                PollKind::Receiver,
+                PollObservation {
+                    interval_secs: RECEIVER_POLL_INTERVAL_SECS,
+                    duration_ms,
+                    skipped: false,
+                    changes_applied,
+                    error: poll_error.clone(),
+                },
+            );
+            tracing::debug!(
+                poll = "receiver",
+                interval_secs = RECEIVER_POLL_INTERVAL_SECS,
+                duration_ms,
+                skipped = false,
+                changes_applied,
+                error = ?poll_error,
+                "completed receiver refresh"
+            );
+            if should_refresh {
+                refresh_ui(&controller);
+            }
+            ControlFlow::Continue
+        })
     });
 }
 
 fn start_streaming_poll(controller: UiController) {
-    glib::timeout_add_seconds_local(1, move || {
-        let snapshot = controller
-            .sender
-            .lock()
-            .expect("sender session mutex")
-            .snapshot();
-        let previous_snapshot = controller.state.borrow().streaming.clone();
-        let state_message = if previous_snapshot.state != snapshot.state {
-            Some(format!("Sender stream state is now {:?}", snapshot.state))
-        } else {
-            None
-        };
-        let local_mirror_state_message =
-            if previous_snapshot.local_mirror.state != snapshot.local_mirror.state {
-                Some(format!(
-                    "Local playback mirror is now {:?}",
-                    snapshot.local_mirror.state
-                ))
+    glib::timeout_add_seconds_local(STREAMING_POLL_INTERVAL_SECS as u32, move || {
+        guarded_timeout_callback(&controller, "streaming-poll", || {
+            let started = Instant::now();
+            let snapshot = controller
+                .sender
+                .lock()
+                .expect("sender session mutex")
+                .snapshot();
+            let previous_snapshot = controller.state.borrow().streaming.clone();
+            let state_message = if previous_snapshot.state != snapshot.state {
+                Some(format!("Sender stream state is now {:?}", snapshot.state))
             } else {
                 None
             };
-        let error_message = if previous_snapshot.last_error != snapshot.last_error {
-            snapshot
-                .last_error
-                .as_ref()
-                .map(|error| format!("Sender stream reported: {error}"))
-        } else {
-            None
-        };
-        let local_mirror_error_message =
-            if previous_snapshot.local_mirror.last_error != snapshot.local_mirror.last_error {
+            let local_mirror_state_message =
+                if previous_snapshot.local_mirror.state != snapshot.local_mirror.state {
+                    Some(format!(
+                        "Local playback mirror is now {:?}",
+                        snapshot.local_mirror.state
+                    ))
+                } else {
+                    None
+                };
+            let error_message = if previous_snapshot.last_error != snapshot.last_error {
                 snapshot
-                    .local_mirror
                     .last_error
                     .as_ref()
-                    .map(|error| format!("Local playback mirror reported: {error}"))
+                    .map(|error| format!("Sender stream reported: {error}"))
             } else {
                 None
             };
-        let target_messages =
-            stream_target_transition_messages(&previous_snapshot.targets, &snapshot.targets);
+            let local_mirror_error_message =
+                if previous_snapshot.local_mirror.last_error != snapshot.local_mirror.last_error {
+                    snapshot
+                        .local_mirror
+                        .last_error
+                        .as_ref()
+                        .map(|error| format!("Local playback mirror reported: {error}"))
+                } else {
+                    None
+                };
+            let target_messages =
+                stream_target_transition_messages(&previous_snapshot.targets, &snapshot.targets);
+            let state_message_present = state_message.is_some();
+            let error_message_present = error_message.is_some();
+            let local_mirror_state_message_present = local_mirror_state_message.is_some();
+            let local_mirror_error_message_present = local_mirror_error_message.is_some();
+            let mut changes_applied = target_messages.len();
+            let should_refresh = previous_snapshot != snapshot || !target_messages.is_empty();
+            let poll_error = snapshot.last_error.clone();
 
-        {
-            let mut state = controller.state.borrow_mut();
-            state.apply_streaming_snapshot(snapshot);
-            if let Some(message) = state_message {
-                state
-                    .diagnostics
-                    .push(DiagnosticEvent::info("streaming", message));
+            {
+                let mut state = controller.state.borrow_mut();
+                state.apply_streaming_snapshot(snapshot);
+                if let Some(message) = state_message {
+                    state
+                        .diagnostics
+                        .push(DiagnosticEvent::info("streaming", message));
+                }
+                if let Some(message) = error_message {
+                    state
+                        .diagnostics
+                        .push(DiagnosticEvent::warning("streaming", message));
+                    changes_applied += 1;
+                }
+                if let Some(message) = local_mirror_state_message {
+                    state
+                        .diagnostics
+                        .push(DiagnosticEvent::info("streaming", message));
+                    changes_applied += 1;
+                }
+                if let Some(message) = local_mirror_error_message {
+                    state
+                        .diagnostics
+                        .push(DiagnosticEvent::warning("streaming", message));
+                    changes_applied += 1;
+                }
+                for message in target_messages {
+                    state.diagnostics.push(message);
+                }
+                if state_message_present {
+                    changes_applied += 1;
+                }
+                if error_message_present {
+                    changes_applied += 1;
+                }
+                if local_mirror_state_message_present {
+                    changes_applied += 1;
+                }
+                if local_mirror_error_message_present {
+                    changes_applied += 1;
+                }
             }
-            if let Some(message) = error_message {
-                state
-                    .diagnostics
-                    .push(DiagnosticEvent::warning("streaming", message));
-            }
-            if let Some(message) = local_mirror_state_message {
-                state
-                    .diagnostics
-                    .push(DiagnosticEvent::info("streaming", message));
-            }
-            if let Some(message) = local_mirror_error_message {
-                state
-                    .diagnostics
-                    .push(DiagnosticEvent::warning("streaming", message));
-            }
-            for message in target_messages {
-                state.diagnostics.push(message);
-            }
-        }
 
-        refresh_ui(&controller);
-        ControlFlow::Continue
+            let duration_ms = elapsed_ms(started);
+            let poll_error_for_log = poll_error.clone();
+            controller.diagnostics_runtime.note_poll(
+                PollKind::Streaming,
+                PollObservation {
+                    interval_secs: STREAMING_POLL_INTERVAL_SECS,
+                    duration_ms,
+                    skipped: false,
+                    changes_applied,
+                    error: poll_error,
+                },
+            );
+            tracing::debug!(
+                poll = "streaming",
+                interval_secs = STREAMING_POLL_INTERVAL_SECS,
+                duration_ms,
+                skipped = false,
+                changes_applied,
+                error = ?poll_error_for_log,
+                "completed streaming refresh"
+            );
+            if should_refresh {
+                refresh_ui(&controller);
+            }
+            ControlFlow::Continue
+        })
     });
 }
 
 fn start_audio_inventory_poll(controller: UiController) {
-    let mut last_source_error = None::<String>;
-    let mut last_playback_error = None::<String>;
-
-    glib::timeout_add_seconds_local(1, move || {
-        match controller.audio_backend.list_sources() {
-            Ok(sources) => {
-                last_source_error = None;
-                let mut source_change_message = None::<DiagnosticEvent>;
-                let mut source_selection_changed = false;
-                {
-                    let mut state = controller.state.borrow_mut();
-                    let previous_selected = state.selected_audio_source_id.clone();
-                    let previous_sources = state.audio_sources.len();
-                    state.set_audio_sources(sources);
-                    if previous_selected != state.selected_audio_source_id {
-                        source_selection_changed = true;
-                        source_change_message = Some(DiagnosticEvent::warning(
-                            "audio",
-                            format!(
-                                "Capture source inventory changed; selected source is now {}.",
-                                format_selected_audio_source(&state)
-                            ),
-                        ));
-                    } else if previous_sources == 0 && !state.audio_sources.is_empty() {
-                        source_change_message = Some(DiagnosticEvent::info(
-                            "audio",
-                            format!(
-                                "Detected {} capture source(s) from {}.",
-                                state.audio_sources.len(),
-                                controller.context.audio_backend_name
-                            ),
-                        ));
-                    }
-                    if let Some(message) = source_change_message.take() {
-                        state.diagnostics.push(message);
-                    }
-                }
-                if source_selection_changed {
-                    persist_current_config(&controller, "audio", None);
-                }
-            }
-            Err(error) => {
-                let message = format!("PipeWire source enumeration failed: {error}");
-                if last_source_error.as_deref() != Some(message.as_str()) {
-                    controller
-                        .state
-                        .borrow_mut()
-                        .diagnostics
-                        .push(DiagnosticEvent::warning("audio", message.clone()));
-                }
-                last_source_error = Some(message);
-            }
-        }
-
-        match controller.audio_backend.list_playback_targets() {
-            Ok(targets) => {
-                last_playback_error = None;
-
-                let mut local_retry_target = None::<Option<String>>;
-                let mut local_transition_message = None::<DiagnosticEvent>;
-                let mut receiver_transition_message = None::<DiagnosticEvent>;
-
-                {
-                    let mut state = controller.state.borrow_mut();
-                    let targets_changed = state.playback_targets != targets;
-                    let previous_local_available = state.local_playback_target_available();
-                    let previous_receiver_available = state.receiver_playback_target_available();
-                    let previous_local_target_id =
-                        state.config.audio.local_playback_target_id.clone();
-                    let previous_receiver_target_id =
-                        state.config.receiver.playback_target_id.clone();
-
-                    state.set_playback_targets(targets);
-
-                    let local_available = state.local_playback_target_available();
-                    let receiver_available = state.receiver_playback_target_available();
-
-                    if previous_local_available != local_available {
-                        local_transition_message = Some(playback_target_transition_diagnostic(
-                            &state,
-                            "streaming",
-                            "Local mirror output",
-                            previous_local_target_id.as_deref(),
-                            local_available,
-                        ));
-                        if local_available
-                            && state.streaming.state != synchrosonic_core::StreamSessionState::Idle
-                            && state.streaming.local_mirror.desired_enabled
-                            && state.streaming.local_mirror.state
-                                == synchrosonic_core::LocalMirrorState::Error
-                        {
-                            local_retry_target = Some(previous_local_target_id);
-                        }
-                    }
-
-                    if previous_receiver_available != receiver_available {
-                        receiver_transition_message = Some(playback_target_transition_diagnostic(
-                            &state,
-                            "receiver",
-                            "Receiver output",
-                            previous_receiver_target_id.as_deref(),
-                            receiver_available,
-                        ));
-                    }
-
-                    if let Some(message) = local_transition_message.take() {
-                        state.diagnostics.push(message);
-                    }
-                    if let Some(message) = receiver_transition_message.take() {
-                        state.diagnostics.push(message);
-                    }
-
-                    if !targets_changed
-                        && previous_local_available == local_available
-                        && previous_receiver_available == receiver_available
-                    {
-                        // No-op; we still refresh the UI below in case source inventory changed.
-                    }
-                }
-
-                if let Some(target_id) = local_retry_target.flatten() {
-                    let retry_result = controller
-                        .sender
-                        .lock()
-                        .expect("sender session mutex")
-                        .set_local_playback_target(Some(target_id.clone()));
-                    let snapshot = controller
-                        .sender
-                        .lock()
-                        .expect("sender session mutex")
-                        .snapshot();
-                    let mut state = controller.state.borrow_mut();
-                    state.apply_streaming_snapshot(snapshot);
-                    match retry_result {
-                        Ok(()) => {
-                            let selected_target = format_selected_playback_target(
-                                &state,
-                                state.config.audio.local_playback_target_id.as_deref(),
+    let (sender, receiver) = mpsc::channel::<AudioInventoryRefreshResult>();
+    let last_inventory_error = Rc::new(RefCell::new(None::<String>));
+    {
+        let controller = controller.clone();
+        let last_inventory_error = Rc::clone(&last_inventory_error);
+        glib::timeout_add_local(std::time::Duration::from_millis(250), move || {
+            guarded_timeout_callback(&controller, "audio-inventory-result-pump", || {
+                loop {
+                    match receiver.try_recv() {
+                        Ok(refresh_result) => {
+                            apply_audio_inventory_refresh_result(
+                                &controller,
+                                refresh_result,
+                                &last_inventory_error,
                             );
-                            state.diagnostics.push(DiagnosticEvent::info(
-                                "streaming",
-                                format!(
-                                    "Local mirror output {target_id} is available again; retrying playback on {selected_target}."
-                                ),
-                            ));
                         }
-                        Err(error) => state.diagnostics.push(DiagnosticEvent::warning(
-                            "streaming",
-                            format!(
-                                "Local mirror output became available again, but restart failed: {error}"
-                            ),
-                        )),
+                        Err(TryRecvError::Empty) => break,
+                        Err(TryRecvError::Disconnected) => return ControlFlow::Break,
                     }
                 }
-            }
-            Err(error) => {
-                let message = format!("PipeWire playback target enumeration failed: {error}");
-                if last_playback_error.as_deref() != Some(message.as_str()) {
-                    controller
-                        .state
-                        .borrow_mut()
-                        .diagnostics
-                        .push(DiagnosticEvent::warning("audio", message.clone()));
-                }
-                last_playback_error = Some(message);
-            }
-        }
+                ControlFlow::Continue
+            })
+        });
+    }
 
-        refresh_ui(&controller);
-        ControlFlow::Continue
+    let refresh_in_flight = Arc::new(AtomicBool::new(false));
+    glib::timeout_add_seconds_local(AUDIO_INVENTORY_POLL_INTERVAL_SECS as u32, move || {
+        guarded_timeout_callback(&controller, "audio-inventory-poll", || {
+            if refresh_in_flight.swap(true, Ordering::SeqCst) {
+                controller.diagnostics_runtime.note_poll(
+                    PollKind::AudioSources,
+                    PollObservation {
+                        interval_secs: AUDIO_INVENTORY_POLL_INTERVAL_SECS,
+                        duration_ms: 0,
+                        skipped: true,
+                        changes_applied: 0,
+                        error: None,
+                    },
+                );
+                controller.diagnostics_runtime.note_poll(
+                    PollKind::PlaybackTargets,
+                    PollObservation {
+                        interval_secs: AUDIO_INVENTORY_POLL_INTERVAL_SECS,
+                        duration_ms: 0,
+                        skipped: true,
+                        changes_applied: 0,
+                        error: None,
+                    },
+                );
+                tracing::debug!(
+                    poll = "audio-inventory",
+                    interval_secs = AUDIO_INVENTORY_POLL_INTERVAL_SECS,
+                    duration_ms = 0_u64,
+                    skipped = true,
+                    changes_applied = 0_usize,
+                    "skipped audio inventory refresh because the previous run is still active"
+                );
+                return ControlFlow::Continue;
+            }
+
+            let sender = sender.clone();
+            let refresh_in_flight = Arc::clone(&refresh_in_flight);
+            let audio_backend = controller.audio_backend.clone();
+            thread::spawn(move || {
+                let started = Instant::now();
+                let result = audio_backend.list_inventory();
+                let duration_ms = elapsed_ms(started);
+                let _ = sender.send(AudioInventoryRefreshResult {
+                    result,
+                    duration_ms,
+                });
+                refresh_in_flight.store(false, Ordering::SeqCst);
+            });
+
+            ControlFlow::Continue
+        })
     });
 }
 
 fn refresh_audio_inventory(audio_backend: &LinuxAudioBackend, state: &mut AppState) {
-    match audio_backend.list_sources() {
-        Ok(sources) => state.set_audio_sources(sources),
+    match audio_backend.list_inventory() {
+        Ok((sources, targets)) => {
+            state.set_audio_sources(sources);
+            state.set_playback_targets(targets);
+        }
         Err(error) => state.diagnostics.push(DiagnosticEvent::warning(
             "audio",
-            format!("PipeWire source enumeration failed: {error}"),
+            format!("PipeWire audio inventory enumeration failed: {error}"),
         )),
+    }
+}
+
+fn apply_audio_inventory_refresh_result(
+    controller: &UiController,
+    refresh_result: AudioInventoryRefreshResult,
+    last_inventory_error: &Rc<RefCell<Option<String>>>,
+) {
+    let mut should_refresh = false;
+    let mut source_changes_applied = 0_usize;
+    let mut playback_changes_applied = 0_usize;
+    let mut source_selection_changed = false;
+
+    match refresh_result.result {
+        Ok((sources, targets)) => {
+            *last_inventory_error.borrow_mut() = None;
+
+            let mut local_retry_target = None::<Option<String>>;
+            {
+                let mut state = controller.state.borrow_mut();
+                let previous_selected_source = state.selected_audio_source_id.clone();
+                let previous_sources = state.audio_sources.clone();
+                let previous_targets = state.playback_targets.clone();
+                let previous_local_available = state.local_playback_target_available();
+                let previous_receiver_available = state.receiver_playback_target_available();
+                let previous_local_target_id = state.config.audio.local_playback_target_id.clone();
+                let previous_receiver_target_id = state.config.receiver.playback_target_id.clone();
+
+                state.set_audio_sources(sources);
+                state.set_playback_targets(targets);
+
+                if previous_sources != state.audio_sources {
+                    source_changes_applied += 1;
+                    should_refresh = true;
+                }
+                if previous_selected_source != state.selected_audio_source_id {
+                    source_changes_applied += 1;
+                    should_refresh = true;
+                    source_selection_changed = true;
+                    let selected_source = format_selected_audio_source(&state);
+                    state.diagnostics.push(DiagnosticEvent::warning(
+                        "audio",
+                        format!(
+                            "Capture source inventory changed; selected source is now {}.",
+                            selected_source
+                        ),
+                    ));
+                } else if previous_sources.is_empty() && !state.audio_sources.is_empty() {
+                    source_changes_applied += 1;
+                    should_refresh = true;
+                    let source_count = state.audio_sources.len();
+                    state.diagnostics.push(DiagnosticEvent::info(
+                        "audio",
+                        format!(
+                            "Detected {} capture source(s) from {}.",
+                            source_count, controller.context.audio_backend_name
+                        ),
+                    ));
+                }
+
+                let targets_changed = previous_targets != state.playback_targets;
+                let local_available = state.local_playback_target_available();
+                let receiver_available = state.receiver_playback_target_available();
+
+                if targets_changed {
+                    playback_changes_applied += 1;
+                    should_refresh = true;
+                }
+                if previous_local_available != local_available {
+                    playback_changes_applied += 1;
+                    should_refresh = true;
+                    let transition = playback_target_transition_diagnostic(
+                        &state,
+                        "streaming",
+                        "Local mirror output",
+                        previous_local_target_id.as_deref(),
+                        local_available,
+                    );
+                    state.diagnostics.push(transition);
+                    if local_available
+                        && state.streaming.state != synchrosonic_core::StreamSessionState::Idle
+                        && state.streaming.local_mirror.desired_enabled
+                        && state.streaming.local_mirror.state
+                            == synchrosonic_core::LocalMirrorState::Error
+                    {
+                        local_retry_target = Some(previous_local_target_id);
+                    }
+                }
+                if previous_receiver_available != receiver_available {
+                    playback_changes_applied += 1;
+                    should_refresh = true;
+                    let transition = playback_target_transition_diagnostic(
+                        &state,
+                        "receiver",
+                        "Receiver output",
+                        previous_receiver_target_id.as_deref(),
+                        receiver_available,
+                    );
+                    state.diagnostics.push(transition);
+                }
+            }
+
+            if let Some(target_id) = local_retry_target.flatten() {
+                let retry_result = controller
+                    .sender
+                    .lock()
+                    .expect("sender session mutex")
+                    .set_local_playback_target(Some(target_id.clone()));
+                let snapshot = controller
+                    .sender
+                    .lock()
+                    .expect("sender session mutex")
+                    .snapshot();
+                let mut state = controller.state.borrow_mut();
+                state.apply_streaming_snapshot(snapshot);
+                should_refresh = true;
+                playback_changes_applied += 1;
+                match retry_result {
+                    Ok(()) => {
+                        let selected_target = format_selected_playback_target(
+                            &state,
+                            state.config.audio.local_playback_target_id.as_deref(),
+                        );
+                        state.diagnostics.push(DiagnosticEvent::info(
+                            "streaming",
+                            format!(
+                                "Local mirror output {target_id} is available again; retrying playback on {selected_target}."
+                            ),
+                        ));
+                    }
+                    Err(error) => state.diagnostics.push(DiagnosticEvent::warning(
+                        "streaming",
+                        format!(
+                            "Local mirror output became available again, but restart failed: {error}"
+                        ),
+                    )),
+                }
+            }
+
+            controller.diagnostics_runtime.note_poll(
+                PollKind::AudioSources,
+                PollObservation {
+                    interval_secs: AUDIO_INVENTORY_POLL_INTERVAL_SECS,
+                    duration_ms: refresh_result.duration_ms,
+                    skipped: false,
+                    changes_applied: source_changes_applied,
+                    error: None,
+                },
+            );
+            controller.diagnostics_runtime.note_poll(
+                PollKind::PlaybackTargets,
+                PollObservation {
+                    interval_secs: AUDIO_INVENTORY_POLL_INTERVAL_SECS,
+                    duration_ms: refresh_result.duration_ms,
+                    skipped: false,
+                    changes_applied: playback_changes_applied,
+                    error: None,
+                },
+            );
+            tracing::debug!(
+                poll = "audio-inventory",
+                interval_secs = AUDIO_INVENTORY_POLL_INTERVAL_SECS,
+                duration_ms = refresh_result.duration_ms,
+                skipped = false,
+                source_changes_applied,
+                playback_changes_applied,
+                "completed audio inventory refresh"
+            );
+        }
+        Err(error) => {
+            let message = format!("PipeWire audio inventory enumeration failed: {error}");
+            let changed = last_inventory_error.borrow().as_deref() != Some(message.as_str());
+            if changed {
+                controller
+                    .state
+                    .borrow_mut()
+                    .diagnostics
+                    .push(DiagnosticEvent::warning("audio", message.clone()));
+                should_refresh = true;
+            }
+            *last_inventory_error.borrow_mut() = Some(message.clone());
+            controller.diagnostics_runtime.note_poll(
+                PollKind::AudioSources,
+                PollObservation {
+                    interval_secs: AUDIO_INVENTORY_POLL_INTERVAL_SECS,
+                    duration_ms: refresh_result.duration_ms,
+                    skipped: false,
+                    changes_applied: 0,
+                    error: Some(message.clone()),
+                },
+            );
+            controller.diagnostics_runtime.note_poll(
+                PollKind::PlaybackTargets,
+                PollObservation {
+                    interval_secs: AUDIO_INVENTORY_POLL_INTERVAL_SECS,
+                    duration_ms: refresh_result.duration_ms,
+                    skipped: false,
+                    changes_applied: 0,
+                    error: Some(message.clone()),
+                },
+            );
+            tracing::debug!(
+                poll = "audio-inventory",
+                interval_secs = AUDIO_INVENTORY_POLL_INTERVAL_SECS,
+                duration_ms = refresh_result.duration_ms,
+                skipped = false,
+                changes_applied = 0_usize,
+                error = %message,
+                "audio inventory refresh failed"
+            );
+        }
     }
 
-    match audio_backend.list_playback_targets() {
-        Ok(targets) => state.set_playback_targets(targets),
-        Err(error) => state.diagnostics.push(DiagnosticEvent::warning(
-            "audio",
-            format!("PipeWire playback target enumeration failed: {error}"),
-        )),
+    if source_selection_changed {
+        persist_current_config(controller, "audio", None);
     }
+    if should_refresh {
+        refresh_ui(controller);
+    }
+}
+
+fn elapsed_ms(started: Instant) -> u64 {
+    started.elapsed().as_millis() as u64
 }
 
 fn playback_target_transition_diagnostic(

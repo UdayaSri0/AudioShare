@@ -39,3 +39,5 @@ Validation:
 - run build/test steps
 - summarize release readiness and remaining blockers
 ```
+used 
+v0.0.12

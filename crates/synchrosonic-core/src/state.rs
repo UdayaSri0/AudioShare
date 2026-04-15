@@ -5,8 +5,8 @@ use crate::{
     config::AppConfig,
     diagnostics::DiagnosticEvent,
     models::{
-        AudioSource, AudioSourceKind, DeviceId, DeviceStatus, DiscoveredDevice, DiscoveryEvent,
-        DiscoverySnapshot, PlaybackTarget, QualityPreset,
+        AudioSource, AudioSourceKind, DeviceAvailability, DeviceId, DeviceStatus, DiscoveredDevice,
+        DiscoveryEvent, DiscoverySnapshot, PlaybackTarget, QualityPreset,
     },
     receiver::{ReceiverLatencyPreset, ReceiverServiceState, ReceiverSnapshot},
     streaming::{LocalMirrorState, StreamSessionSnapshot, StreamSessionState},
@@ -213,10 +213,12 @@ impl AppState {
     }
 
     pub fn select_receiver_device(&mut self, device_id: DeviceId) -> bool {
-        let is_valid = self
-            .discovered_devices
-            .iter()
-            .any(|device| device.id == device_id && device.capabilities.supports_receiver);
+        let is_valid = self.discovered_devices.iter().any(|device| {
+            device.id == device_id
+                && device.capabilities.supports_receiver
+                && device.endpoint.is_some()
+                && device.availability != DeviceAvailability::Unavailable
+        });
         if !is_valid {
             return false;
         }
@@ -291,6 +293,7 @@ impl AppState {
                     &device.id == selected_id
                         && device.capabilities.supports_receiver
                         && device.endpoint.is_some()
+                        && device.availability != DeviceAvailability::Unavailable
                 })
             })
             .unwrap_or(false);
@@ -302,7 +305,11 @@ impl AppState {
         self.selected_receiver_device_id = self
             .discovered_devices
             .iter()
-            .find(|device| device.capabilities.supports_receiver && device.endpoint.is_some())
+            .find(|device| {
+                device.capabilities.supports_receiver
+                    && device.endpoint.is_some()
+                    && device.availability != DeviceAvailability::Unavailable
+            })
             .map(|device| device.id.clone());
     }
 }

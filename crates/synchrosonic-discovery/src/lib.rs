@@ -1,6 +1,6 @@
 use std::{
     collections::{HashMap, VecDeque},
-    net::SocketAddr,
+    net::{IpAddr, Ipv4Addr, SocketAddr},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -315,10 +315,10 @@ impl DeviceRegistry {
 
         match self.devices.get_mut(&device_id) {
             Some(entry) => {
-                entry.device = device.clone();
+                entry.device = merge_discovered_device(&entry.device, device.clone());
                 entry.last_seen = Instant::now();
                 entry.marked_stale = false;
-                DiscoveryEvent::DeviceUpdated(device)
+                DiscoveryEvent::DeviceUpdated(entry.device.clone())
             }
             None => {
                 self.devices.insert(
@@ -400,15 +400,14 @@ fn discovered_device_from_resolved(
             .unwrap_or("available"),
     );
 
-    let endpoint = service
-        .get_addresses()
-        .iter()
-        .find(|address| address.is_ipv4())
-        .or_else(|| service.get_addresses().iter().next())
-        .map(|address| TransportEndpoint {
-            device_id: DeviceId::new(device_id),
-            address: SocketAddr::new(address.to_ip_addr(), service.get_port()),
-        });
+    let endpoint = select_preferred_endpoint(
+        &DeviceId::new(device_id),
+        service
+            .get_addresses()
+            .iter()
+            .map(|address| address.to_ip_addr()),
+        service.get_port(),
+    );
 
     Ok(DiscoveredDevice {
         id: DeviceId::new(device_id),
@@ -511,6 +510,91 @@ fn now_unix_ms() -> u64 {
         .as_millis() as u64
 }
 
+fn merge_discovered_device(
+    existing: &DiscoveredDevice,
+    mut incoming: DiscoveredDevice,
+) -> DiscoveredDevice {
+    incoming.endpoint = preferred_endpoint(existing.endpoint.as_ref(), incoming.endpoint.as_ref());
+    incoming
+}
+
+fn select_preferred_endpoint<I>(
+    device_id: &DeviceId,
+    addresses: I,
+    port: u16,
+) -> Option<TransportEndpoint>
+where
+    I: IntoIterator<Item = IpAddr>,
+{
+    select_preferred_ip_address(addresses).map(|address| TransportEndpoint {
+        device_id: device_id.clone(),
+        address: SocketAddr::new(address, port),
+    })
+}
+
+fn preferred_endpoint(
+    existing: Option<&TransportEndpoint>,
+    incoming: Option<&TransportEndpoint>,
+) -> Option<TransportEndpoint> {
+    match (existing, incoming) {
+        (Some(existing), Some(incoming))
+            if endpoint_rank(incoming.address.ip()) > endpoint_rank(existing.address.ip()) =>
+        {
+            Some(incoming.clone())
+        }
+        (Some(existing), _) => Some(existing.clone()),
+        (None, Some(incoming)) => Some(incoming.clone()),
+        (None, None) => None,
+    }
+}
+
+fn select_preferred_ip_address<I>(addresses: I) -> Option<IpAddr>
+where
+    I: IntoIterator<Item = IpAddr>,
+{
+    addresses
+        .into_iter()
+        .max_by_key(|address| endpoint_rank(*address))
+}
+
+fn endpoint_rank(address: IpAddr) -> (u8, u8) {
+    match address {
+        IpAddr::V4(address) => {
+            let quality =
+                if address.is_loopback() || address.is_unspecified() || address.is_multicast() {
+                    0
+                } else if is_likely_docker_ipv4(address) {
+                    1
+                } else if address.is_link_local() {
+                    2
+                } else if address.is_private() {
+                    5
+                } else {
+                    4
+                };
+            (quality, 1)
+        }
+        IpAddr::V6(address) => {
+            let quality =
+                if address.is_loopback() || address.is_unspecified() || address.is_multicast() {
+                    0
+                } else if address.is_unicast_link_local() {
+                    2
+                } else if address.is_unique_local() {
+                    3
+                } else {
+                    4
+                };
+            (quality, 0)
+        }
+    }
+}
+
+fn is_likely_docker_ipv4(address: Ipv4Addr) -> bool {
+    let [first, second, ..] = address.octets();
+    first == 172 && (17..=31).contains(&second)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -564,6 +648,72 @@ mod tests {
     }
 
     #[test]
+    fn preferred_endpoint_selection_avoids_loopback_and_docker_when_lan_exists() {
+        let endpoint = select_preferred_endpoint(
+            &DeviceId::new("device-1"),
+            [
+                IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
+                IpAddr::V4(Ipv4Addr::new(172, 17, 0, 1)),
+                IpAddr::V4(Ipv4Addr::new(192, 168, 8, 127)),
+            ],
+            51_700,
+        )
+        .expect("a preferred endpoint should be selected");
+
+        assert_eq!(
+            endpoint.address,
+            SocketAddr::from(([192, 168, 8, 127], 51_700))
+        );
+    }
+
+    #[test]
+    fn registry_keeps_the_best_endpoint_for_duplicate_device_updates() {
+        let mut registry = DeviceRegistry::new(Duration::from_secs(30));
+        let docker_endpoint = Some(TransportEndpoint {
+            device_id: DeviceId::new("device-1"),
+            address: SocketAddr::from(([172, 17, 0, 1], 51_700)),
+        });
+        let lan_endpoint = Some(TransportEndpoint {
+            device_id: DeviceId::new("device-1"),
+            address: SocketAddr::from(([192, 168, 8, 127], 51_700)),
+        });
+        let loopback_endpoint = Some(TransportEndpoint {
+            device_id: DeviceId::new("device-1"),
+            address: SocketAddr::from(([127, 0, 0, 1], 51_700)),
+        });
+
+        registry.upsert(test_device_with_endpoint(
+            "device-1",
+            "Receiver",
+            "receiver._synchrosonic._tcp.local.",
+            docker_endpoint,
+        ));
+        registry.upsert(test_device_with_endpoint(
+            "device-1",
+            "Receiver",
+            "receiver._synchrosonic._tcp.local.",
+            lan_endpoint,
+        ));
+        registry.upsert(test_device_with_endpoint(
+            "device-1",
+            "Receiver",
+            "receiver._synchrosonic._tcp.local.",
+            loopback_endpoint,
+        ));
+
+        let snapshot = registry.snapshot();
+        assert_eq!(snapshot.devices.len(), 1);
+        assert_eq!(
+            snapshot.devices[0]
+                .endpoint
+                .as_ref()
+                .expect("device should keep an endpoint")
+                .address,
+            SocketAddr::from(([192, 168, 8, 127], 51_700))
+        );
+    }
+
+    #[test]
     fn registry_marks_stale_entries_unavailable() {
         let mut registry = DeviceRegistry::new(Duration::from_millis(0));
         registry.upsert(test_device(
@@ -583,6 +733,15 @@ mod tests {
     }
 
     fn test_device(id: &str, name: &str, fullname: &str) -> DiscoveredDevice {
+        test_device_with_endpoint(id, name, fullname, None)
+    }
+
+    fn test_device_with_endpoint(
+        id: &str,
+        name: &str,
+        fullname: &str,
+        endpoint: Option<TransportEndpoint>,
+    ) -> DiscoveredDevice {
         DiscoveredDevice {
             id: DeviceId::new(id),
             display_name: name.to_string(),
@@ -591,7 +750,7 @@ mod tests {
             capabilities: DeviceCapabilities::receiver(),
             availability: DeviceAvailability::Available,
             status: DeviceStatus::Discovered,
-            endpoint: None,
+            endpoint,
             service_fullname: fullname.to_string(),
             last_seen_unix_ms: now_unix_ms(),
         }

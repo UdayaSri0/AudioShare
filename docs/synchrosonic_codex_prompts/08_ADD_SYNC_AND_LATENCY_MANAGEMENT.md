@@ -31,3 +31,5 @@ Validation:
 - compile
 - explain how timestamps/latency are managed in the current version
 ```
+used
+v0.0.8

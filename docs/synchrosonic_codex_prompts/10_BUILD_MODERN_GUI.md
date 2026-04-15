@@ -50,3 +50,6 @@ Validation:
 - compile and run
 - summarize all main screens and their connected behaviors
 ```
+
+used
+v0.0.10

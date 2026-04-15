@@ -1,5 +1,5 @@
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     collections::HashMap,
     net::SocketAddr,
     rc::Rc,
@@ -12,9 +12,10 @@ use gtk::{Align, Orientation};
 use synchrosonic_audio::LinuxAudioBackend;
 use synchrosonic_core::{
     services::{AudioBackend, DiscoveryService, ReceiverService},
-    AppConfig, AppState, AudioSource, AudioSourceKind, ConfigLoadReport, DeviceId, DiagnosticEvent,
-    DiagnosticLevel, DiscoveredDevice, PlaybackTarget, PlaybackTargetKind, QualityPreset,
-    ReceiverLatencyPreset, StreamTargetSnapshot,
+    AppConfig, AppState, AudioSource, AudioSourceKind, ConfigLoadReport, DeviceAvailability,
+    DeviceCapabilities, DeviceId, DeviceStatus, DiagnosticEvent, DiagnosticLevel, DiscoveredDevice,
+    PlaybackTarget, PlaybackTargetKind, QualityPreset, ReceiverLatencyPreset, StreamTargetSnapshot,
+    TransportEndpoint,
 };
 use synchrosonic_discovery::MdnsDiscoveryService;
 use synchrosonic_receiver::ReceiverRuntime;
@@ -50,6 +51,11 @@ struct UiContext {
     discovery_started: bool,
 }
 
+#[derive(Clone, Default)]
+struct UiRefreshGuards {
+    receiver_selector_refreshing: Rc<Cell<bool>>,
+}
+
 #[derive(Clone)]
 struct UiController {
     state: Rc<RefCell<AppState>>,
@@ -62,6 +68,7 @@ struct UiController {
     context: UiContext,
     paths: AppPaths,
     log_store: LogStore,
+    refresh_guards: UiRefreshGuards,
 }
 
 #[derive(Clone)]
@@ -289,6 +296,7 @@ pub fn build_main_window(app: &adw::Application, launch: UiLaunchContext) {
         },
         paths: launch.paths.clone(),
         log_store: launch.log_store.clone(),
+        refresh_guards: UiRefreshGuards::default(),
     };
 
     refresh_ui(&controller);
@@ -436,13 +444,34 @@ fn connect_casting_controls(controller: &UiController) {
         let controller = controller.clone();
         let receiver_selector = controller.widgets.casting.receiver_selector.clone();
         receiver_selector.connect_changed(move |selector| {
-            if let Some(active_id) = selector.active_id() {
-                let _ = controller
-                    .state
-                    .borrow_mut()
-                    .select_receiver_device(DeviceId::new(active_id.as_str()));
-                refresh_ui(&controller);
+            if controller.refresh_guards.receiver_selector_refreshing.get() {
+                return;
             }
+
+            let Some(active_id) = selector.active_id() else {
+                return;
+            };
+            let selection_unchanged = {
+                let state = controller.state.borrow();
+                state
+                    .selected_receiver_device_id
+                    .as_ref()
+                    .map(|id| id.as_str())
+                    == Some(active_id.as_str())
+            };
+            if selection_unchanged {
+                return;
+            }
+
+            let changed = controller
+                .state
+                .borrow_mut()
+                .select_receiver_device(DeviceId::new(active_id.as_str()));
+            if !changed {
+                return;
+            }
+
+            refresh_ui(&controller);
         });
     }
 
@@ -914,7 +943,7 @@ fn connect_diagnostics_controls(controller: &UiController) {
 }
 
 fn refresh_ui(controller: &UiController) {
-    let state = controller.state.borrow();
+    let state = controller.state.borrow().clone();
     refresh_dashboard(controller, &state);
     refresh_discovery_page(controller, &state);
     refresh_casting_page(controller, &state);
@@ -1054,7 +1083,11 @@ fn refresh_discovery_page(controller: &UiController, state: &AppState) {
 }
 
 fn refresh_casting_page(controller: &UiController, state: &AppState) {
-    refresh_receiver_selector(&controller.widgets.casting.receiver_selector, state);
+    refresh_receiver_selector(
+        &controller.widgets.casting.receiver_selector,
+        state,
+        &controller.refresh_guards.receiver_selector_refreshing,
+    );
     refresh_playback_target_selector(
         &controller.widgets.casting.local_output_selector,
         state,
@@ -2424,11 +2457,16 @@ fn empty_state(title: &str, description: &str, icon_name: &str) -> adw::StatusPa
 
 fn start_discovery_poll(mut discovery: MdnsDiscoveryService, controller: UiController) {
     glib::timeout_add_seconds_local(1, move || {
+        let previous_discovered_devices = {
+            let state = controller.state.borrow();
+            effective_discovered_devices(&state.discovered_devices)
+        };
         let previous_selected_receiver = controller
             .state
             .borrow()
             .selected_receiver_device_id
             .clone();
+        let mut should_refresh = false;
 
         loop {
             match discovery.poll_event() {
@@ -2443,6 +2481,7 @@ fn start_discovery_poll(mut discovery: MdnsDiscoveryService, controller: UiContr
                             "discovery",
                             format!("mDNS discovery event error: {error}"),
                         ));
+                    should_refresh = true;
                     break;
                 }
             }
@@ -2454,20 +2493,29 @@ fn start_discovery_poll(mut discovery: MdnsDiscoveryService, controller: UiContr
                     controller.state.borrow_mut().apply_discovery_event(event);
                 }
             }
-            Err(error) => controller
-                .state
-                .borrow_mut()
-                .diagnostics
-                .push(DiagnosticEvent::warning(
-                    "discovery",
-                    format!("mDNS stale pruning failed: {error}"),
-                )),
+            Err(error) => {
+                controller
+                    .state
+                    .borrow_mut()
+                    .diagnostics
+                    .push(DiagnosticEvent::warning(
+                        "discovery",
+                        format!("mDNS stale pruning failed: {error}"),
+                    ));
+                should_refresh = true;
+            }
+        }
+
+        let snapshot = discovery.snapshot();
+        let current_discovered_devices = effective_discovered_devices(&snapshot.devices);
+        if previous_discovered_devices != current_discovered_devices {
+            should_refresh = true;
         }
 
         controller
             .state
             .borrow_mut()
-            .apply_discovery_snapshot(discovery.snapshot());
+            .apply_discovery_snapshot(snapshot);
         let current_selected_receiver = controller
             .state
             .borrow()
@@ -2493,9 +2541,13 @@ fn start_discovery_poll(mut discovery: MdnsDiscoveryService, controller: UiContr
             };
             if let Some(message) = message {
                 controller.state.borrow_mut().diagnostics.push(message);
+                should_refresh = true;
             }
         }
-        refresh_ui(&controller);
+
+        if should_refresh {
+            refresh_ui(&controller);
+        }
         ControlFlow::Continue
     });
 }
@@ -3290,41 +3342,117 @@ fn stream_target_transition_messages(
     messages
 }
 
-fn refresh_receiver_selector(selector: &gtk::ComboBoxText, state: &AppState) {
-    let active_id = state
-        .selected_receiver_device_id
-        .as_ref()
-        .map(ToString::to_string);
+fn refresh_receiver_selector(
+    selector: &gtk::ComboBoxText,
+    state: &AppState,
+    refresh_guard: &Rc<Cell<bool>>,
+) {
+    let options = receiver_selector_options(state);
+    let active_id = desired_receiver_selector_active_id(state, &options);
+    let _guard = ScopedRefreshGuard::new(refresh_guard);
     selector.remove_all();
 
-    for device in state
-        .discovered_devices
-        .iter()
-        .filter(|device| device.capabilities.supports_receiver)
-    {
-        let label = format!(
-            "{} ({})",
-            device.display_name,
-            device
-                .endpoint
-                .as_ref()
-                .map(|endpoint| endpoint.address.to_string())
-                .unwrap_or_else(|| "unresolved".to_string())
-        );
-        selector.append(Some(device.id.as_str()), &label);
+    for option in &options {
+        selector.append(Some(&option.id), &option.label);
     }
 
     if let Some(active_id) = active_id {
         selector.set_active_id(Some(&active_id));
-    } else if !state
+    } else {
+        selector.set_active(None);
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ReceiverSelectorOption {
+    id: String,
+    label: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct EffectiveDiscoveredDevice {
+    id: DeviceId,
+    display_name: String,
+    capabilities: DeviceCapabilities,
+    availability: DeviceAvailability,
+    status: DeviceStatus,
+    endpoint: Option<TransportEndpoint>,
+}
+
+struct ScopedRefreshGuard {
+    flag: Rc<Cell<bool>>,
+}
+
+impl ScopedRefreshGuard {
+    fn new(flag: &Rc<Cell<bool>>) -> Self {
+        flag.set(true);
+        Self {
+            flag: Rc::clone(flag),
+        }
+    }
+}
+
+impl Drop for ScopedRefreshGuard {
+    fn drop(&mut self) {
+        self.flag.set(false);
+    }
+}
+
+fn receiver_selector_options(state: &AppState) -> Vec<ReceiverSelectorOption> {
+    state
         .discovered_devices
         .iter()
-        .filter(|device| device.capabilities.supports_receiver)
-        .collect::<Vec<_>>()
-        .is_empty()
-    {
-        selector.set_active(Some(0));
-    }
+        .filter(|device| {
+            device.capabilities.supports_receiver
+                && device.endpoint.is_some()
+                && device.availability != DeviceAvailability::Unavailable
+        })
+        .map(|device| ReceiverSelectorOption {
+            id: device.id.to_string(),
+            label: format!(
+                "{} ({})",
+                device.display_name,
+                device
+                    .endpoint
+                    .as_ref()
+                    .map(|endpoint| endpoint.address.to_string())
+                    .unwrap_or_else(|| "unresolved".to_string())
+            ),
+        })
+        .collect()
+}
+
+fn desired_receiver_selector_active_id(
+    state: &AppState,
+    options: &[ReceiverSelectorOption],
+) -> Option<String> {
+    let selected_id = state
+        .selected_receiver_device_id
+        .as_ref()
+        .map(ToString::to_string);
+    selected_id
+        .filter(|selected_id| options.iter().any(|option| option.id == *selected_id))
+        .or_else(|| options.first().map(|option| option.id.clone()))
+}
+
+fn effective_discovered_devices(devices: &[DiscoveredDevice]) -> Vec<EffectiveDiscoveredDevice> {
+    let mut devices = devices
+        .iter()
+        .map(|device| EffectiveDiscoveredDevice {
+            id: device.id.clone(),
+            display_name: device.display_name.clone(),
+            capabilities: device.capabilities.clone(),
+            availability: device.availability,
+            status: device.status,
+            endpoint: device.endpoint.clone(),
+        })
+        .collect::<Vec<_>>();
+    devices.sort_by(|left, right| {
+        left.display_name
+            .cmp(&right.display_name)
+            .then_with(|| left.id.as_str().cmp(right.id.as_str()))
+    });
+    devices
 }
 
 fn find_receiver_device(state: &AppState, device_id: &str) -> Option<DiscoveredDevice> {
@@ -3593,4 +3721,86 @@ fn apply_color_scheme(prefer_dark_theme: bool) {
     } else {
         adw::ColorScheme::Default
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::SocketAddr;
+
+    #[test]
+    fn effective_discovery_devices_ignore_last_seen_changes() {
+        let first = vec![test_device(
+            "receiver-1",
+            DeviceAvailability::Available,
+            Some(SocketAddr::from(([192, 168, 8, 127], 51_700))),
+            1_000,
+        )];
+        let second = vec![test_device(
+            "receiver-1",
+            DeviceAvailability::Available,
+            Some(SocketAddr::from(([192, 168, 8, 127], 51_700))),
+            2_000,
+        )];
+
+        assert_eq!(
+            effective_discovered_devices(&first),
+            effective_discovered_devices(&second)
+        );
+    }
+
+    #[test]
+    fn receiver_selector_options_only_include_selectable_receivers() {
+        let mut state = AppState::new(AppConfig::default());
+        state.discovered_devices = vec![
+            test_device(
+                "receiver-1",
+                DeviceAvailability::Available,
+                Some(SocketAddr::from(([192, 168, 8, 127], 51_700))),
+                1_000,
+            ),
+            test_device("receiver-2", DeviceAvailability::Unavailable, None, 1_000),
+            DiscoveredDevice {
+                capabilities: DeviceCapabilities::sender(),
+                ..test_device(
+                    "sender-1",
+                    DeviceAvailability::Available,
+                    Some(SocketAddr::from(([192, 168, 8, 128], 51_700))),
+                    1_000,
+                )
+            },
+        ];
+
+        let options = receiver_selector_options(&state);
+
+        assert_eq!(options.len(), 1);
+        assert_eq!(options[0].id, "receiver-1");
+    }
+
+    fn test_device(
+        id: &str,
+        availability: DeviceAvailability,
+        endpoint: Option<SocketAddr>,
+        last_seen_unix_ms: u64,
+    ) -> DiscoveredDevice {
+        DiscoveredDevice {
+            id: DeviceId::new(id),
+            display_name: id.to_string(),
+            app_version: "0.1.0".to_string(),
+            protocol_version: synchrosonic_core::DISCOVERY_PROTOCOL_VERSION,
+            capabilities: DeviceCapabilities::receiver(),
+            availability,
+            status: if availability == DeviceAvailability::Unavailable {
+                DeviceStatus::Unavailable
+            } else {
+                DeviceStatus::Discovered
+            },
+            endpoint: endpoint.map(|address| TransportEndpoint {
+                device_id: DeviceId::new(id),
+                address,
+            }),
+            service_fullname: format!("{id}._synchrosonic._tcp.local."),
+            last_seen_unix_ms,
+        }
+    }
 }

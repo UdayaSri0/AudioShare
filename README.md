@@ -12,10 +12,11 @@ choice, and first-pass Linux release metadata and packaging layouts.
 
 Current release posture:
 
-- First public tag target: `v0.1.0-rc.1`, to be published as a GitHub pre-release.
+- First public tag target: `v0.1.0-rc.2`, to be published as a GitHub pre-release.
 - Native Linux release builds are supported.
 - The repository stages real native install, AppDir, and Debian filesystem layouts.
-- Final AppImage generation, Debian dependency metadata, signing, and a published private security-reporting path are not fully in place yet.
+- New release tooling now produces final `.AppImage`, `.deb`, and Flatpak `.flatpak` bundle artifacts on tagged builds.
+- Signing and public security reporting remain future work for a stable release.
 
 ## Goals
 
@@ -103,17 +104,21 @@ Linux release assets now included in the repository:
 - release checklist: `docs/release-checklist.md`
 - changelog: `CHANGELOG.md`
 
-The packaging script produces:
+The packaging scripts now produce:
 
 - native Linux install layout tarball
-- AppDir tarball for later AppImage generation
-- Debian filesystem layout tarball
+- final `synchrosonic-<version>-x86_64.AppImage`
+- real `synchrosonic_<version>_amd64.deb`
+- Flatpak bundle `synchrosonic-<version>.flatpak`
+- portable tarball `synchrosonic-<version>-linux-x86_64.tar.gz`
+- checksum manifest `SHA256SUMS.txt`
 
-These are real staging outputs, not pretend final installers. The remaining
-packaging gaps are documented in `docs/linux-packaging.md`.
+Final packaging artifacts are built by `scripts/build-release-artifacts.sh` and
+published on tag-triggered GitHub releases. The staging scripts remain useful
+for local inspection and layout validation.
 
 For the first public tag, those staged artifacts should be presented as preview
-assets for `v0.1.0-rc.1`, not as final signed installers.
+assets for `v0.1.0-rc.2`, not as final signed installers.
 
 ## Community
 

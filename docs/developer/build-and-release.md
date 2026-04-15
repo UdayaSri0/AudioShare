@@ -62,6 +62,20 @@ The packaging script stages these layouts:
 - `target/release-packaging/AppDir`
 - `target/release-packaging/deb`
 
+For final release artifact generation, use:
+
+```bash
+bash scripts/build-release-artifacts.sh
+```
+
+This will also create:
+
+- `synchrosonic-<version>-x86_64.AppImage`
+- `synchrosonic_<version>_amd64.deb`
+- `synchrosonic-<version>.flatpak`
+- `synchrosonic-<version>-linux-x86_64.tar.gz`
+- `SHA256SUMS.txt`
+
 ## What The Packaging Script Does
 
 `scripts/package-linux.sh`:

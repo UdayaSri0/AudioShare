@@ -25,7 +25,7 @@ Use this checklist before publishing a Linux release of SynchroSonic.
 - Run `cargo clippy --workspace --all-targets -- -D warnings`.
 - Run `cargo test --workspace`.
 - Run `cargo build --release -p synchrosonic-app`.
-- Run `bash scripts/package-linux.sh --skip-build`.
+- Run `bash scripts/build-release-artifacts.sh --skip-build`.
 
 ## Packaging Review
 

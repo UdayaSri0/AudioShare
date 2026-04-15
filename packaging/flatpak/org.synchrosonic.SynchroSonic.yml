@@ -1,0 +1,30 @@
+app-id: org.synchrosonic.SynchroSonic
+runtime: org.freedesktop.Platform
+runtime-version: '24.08'
+sdk: org.freedesktop.Sdk
+command: synchrosonic-app
+finish-args:
+  - --share=ipc
+  - --share=network
+  - --socket=wayland
+  - --socket=x11
+  - --socket=pulseaudio
+  - --socket=pipewire
+  - --device=dri
+  - --filesystem=/run/user
+  - --talk-name=org.freedesktop.Notifications
+  - --talk-name=org.freedesktop.Flatpak
+modules:
+  - name: synchrosonic
+    buildsystem: simple
+    build-commands:
+      - cargo build --release -p synchrosonic-app
+      - install -Dm755 target/release/synchrosonic-app /app/bin/synchrosonic-app
+      - install -Dm644 packaging/linux/org.synchrosonic.SynchroSonic.desktop /app/share/applications/org.synchrosonic.SynchroSonic.desktop
+      - install -Dm644 packaging/linux/org.synchrosonic.SynchroSonic.metainfo.xml /app/share/metainfo/org.synchrosonic.SynchroSonic.metainfo.xml
+      - install -Dm644 packaging/linux/org.synchrosonic.SynchroSonic.svg /app/share/icons/hicolor/scalable/apps/org.synchrosonic.SynchroSonic.svg
+      - install -Dm644 README.md /app/share/doc/synchrosonic/README.md
+      - install -Dm644 LICENSE /app/share/doc/synchrosonic/LICENSE
+    sources:
+      - type: dir
+        path: ../../

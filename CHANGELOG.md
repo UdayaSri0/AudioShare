@@ -2,6 +2,25 @@
 
 All notable changes to SynchroSonic will be documented in this file.
 
+## [0.1.0-rc.2] - 2026-04-15
+
+### Added
+
+- Release packaging automation for AppImage, Debian `.deb`, Flatpak bundle, and portable tarball outputs.
+- New helper scripts:` scripts/build-appimage.sh`, `scripts/build-deb.sh`, `scripts/build-flatpak.sh`, and `scripts/build-release-artifacts.sh`.
+- Tag-triggered GitHub Actions release workflow that validates version/tag consistency and uploads final release assets.
+- Flatpak manifest under version control at `packaging/flatpak/org.synchrosonic.SynchroSonic.yml`.
+
+### Changed
+
+- Updated packaging naming conventions to include version and architecture consistently.
+- Release metadata now targets `v0.1.0-rc.2` for the current shipping candidate.
+
+### Known Limitations
+
+- Flatpak support is available as a build artifact, but PipeWire command-line audio integration remains a host-integration limitation.
+- Signing is not yet implemented for AppImage or Debian packages.
+
 ## [0.1.0-rc.1] - 2026-04-15
 
 First public release candidate for the Linux-first Rust/GTK application.

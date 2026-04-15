@@ -104,13 +104,13 @@ if command -v appstreamcli >/dev/null 2>&1; then
     appstreamcli validate --no-net "$METAINFO_FILE"
 fi
 
-artifact_prefix="synchrosonic-${version}-${arch}"
-tar -C "$native_root" -czf "$PACKAGE_ROOT/${artifact_prefix}-native-layout.tar.gz" .
+artifact_prefix="synchrosonic-${version}-linux-${arch}"
+tar -C "$native_root" -czf "$PACKAGE_ROOT/${artifact_prefix}.tar.gz" .
 tar -C "$PACKAGE_ROOT" -czf "$PACKAGE_ROOT/${artifact_prefix}-AppDir.tar.gz" AppDir
 tar -C "$deb_root" -czf "$PACKAGE_ROOT/${artifact_prefix}-deb-layout.tar.gz" .
 
 printf 'Created packaging outputs in %s\n' "$PACKAGE_ROOT"
-printf '  - %s\n' "$PACKAGE_ROOT/${artifact_prefix}-native-layout.tar.gz"
+printf '  - %s\n' "$PACKAGE_ROOT/${artifact_prefix}.tar.gz"
 printf '  - %s\n' "$PACKAGE_ROOT/${artifact_prefix}-AppDir.tar.gz"
 printf '  - %s\n' "$PACKAGE_ROOT/${artifact_prefix}-deb-layout.tar.gz"
 printf '\n'

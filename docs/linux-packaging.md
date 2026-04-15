@@ -82,16 +82,15 @@ Current status:
 
 - the repo produces a valid AppDir-style directory
 - `AppRun`, desktop entry, icon, binary, and metadata are staged together
+- final AppImage generation is now automated through `scripts/build-appimage.sh`
 
 Remaining gap:
 
-- the repository does not yet pin or automate a final AppImage tool such as
-  `appimagetool` or `appimage-builder`
-- the CI job therefore publishes the AppDir staging artifact, not a final
-  `.AppImage`
+- signing is not yet implemented for the `.AppImage`
+- the runtime still depends on host PipeWire tooling for the current audio backend
 
-This is intentional. The AppDir is real and useful, but the final AppImage step
-still needs a tool choice, signing policy, and runtime-library strategy.
+The AppDir is now a real input to a final `synchrosonic-<version>-x86_64.AppImage`
+build, rather than only a staging artifact.
 
 ## Debian Package Plan
 
@@ -102,13 +101,33 @@ Current status:
 
 Remaining gap:
 
-- runtime dependencies are not auto-calculated yet
-- maintainer scripts, changelog packaging, signing, and repository publication
-  are not automated yet
-- CI therefore publishes the Debian layout staging artifact, not a final `.deb`
+- signing and repository publication are not implemented yet
+- CI now builds a real `.deb`, but install-time validation of host dependency
+  coverage should continue to be reviewed
 
-This keeps the packaging work honest. The filesystem layout is implemented now,
-but final Debian packaging still needs dependency and policy refinement.
+This repository now builds a final Debian package with `dpkg-deb --build`, using
+`dpkg-shlibdeps` to infer runtime dependencies from the release binary.
+
+## Flatpak Plan
+
+Current status:
+
+- a Flatpak manifest is now version controlled at
+  `packaging/flatpak/org.synchrosonic.SynchroSonic.yml`
+- the repository includes `scripts/build-flatpak.sh` to build a local Flatpak
+  repository and export a `.flatpak` bundle
+
+Remaining gap:
+
+- the current audio backend depends on PipeWire command-line tools that are
+  still a host-integration detail for a Flatpak sandbox
+- runtime behavior should be validated on a target host because access to
+  `pw-dump`, `pw-record`, and `pw-play` is not guaranteed inside every runtime
+  environment
+
+Flatpak support is treated as a preview artifact path for desktop users and
+for downstream packaging experimentation, with host runtime permissions
+clearly documented.
 
 ## CI Packaging Scope
 
@@ -120,9 +139,16 @@ The GitHub Actions workflow does the following on Ubuntu:
 - `cargo build --release -p synchrosonic-app`
 - `bash scripts/package-linux.sh --skip-build`
 
-It uploads the staged packaging tarballs so maintainers can inspect what the
-release layout currently looks like without pretending they are final signed
-installers.
+A new tag-triggered release workflow additionally builds and publishes:
+
+- final `synchrosonic-<version>-x86_64.AppImage`
+- `synchrosonic_<version>_amd64.deb`
+- `synchrosonic-<version>.flatpak`
+- `synchrosonic-<version>-linux-x86_64.tar.gz`
+- `SHA256SUMS.txt`
+
+The staging workflow remains useful for layout inspection, while the release
+workflow produces the final installable artifacts.
 
 ## Remaining Release Gaps
 

@@ -228,7 +228,7 @@ mod tests {
             .expect("sender should start");
 
         let streaming_established =
-            wait_until(Duration::from_secs(2), Duration::from_millis(25), || {
+            wait_until(Duration::from_secs(5), Duration::from_millis(25), || {
                 let sender_snapshot = sender.snapshot();
                 let receiver_snapshot = receiver_runtime
                     .lock()

@@ -12,7 +12,7 @@ choice, and first-pass Linux release metadata and packaging layouts.
 
 Current release posture:
 
-- First public tag target: `v0.1.0-rc.2`, to be published as a GitHub pre-release.
+- First public tag target: `v0.1.4`, to be published as a GitHub release.
 - Native Linux release builds are supported.
 - The repository stages real native install, AppDir, and Debian filesystem layouts.
 - New release tooling now produces final `.AppImage`, `.deb`, and Flatpak `.flatpak` bundle artifacts on tagged builds.
@@ -118,7 +118,7 @@ published on tag-triggered GitHub releases. The staging scripts remain useful
 for local inspection and layout validation.
 
 For the first public tag, those staged artifacts should be presented as preview
-assets for `v0.1.0-rc.2`, not as final signed installers.
+assets for `v0.1.4`, not as final signed installers.
 
 ## Community
 

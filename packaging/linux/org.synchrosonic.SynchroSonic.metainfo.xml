@@ -15,7 +15,7 @@
   <url type="homepage">https://github.com/synchrosonic/synchrosonic</url>
   <url type="bugtracker">https://github.com/synchrosonic/synchrosonic/issues</url>
   <releases>
-    <release version="0.1.0-rc.2" date="2026-04-15">
+    <release version="0.1.4" date="2026-04-15">
       <description>
         <p>
           First public release candidate for the Rust/GTK SynchroSonic desktop

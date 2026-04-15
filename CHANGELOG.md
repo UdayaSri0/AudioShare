@@ -2,7 +2,7 @@
 
 All notable changes to SynchroSonic will be documented in this file.
 
-## [0.1.4] - 2026-04-15
+## [0.1.5] - 2026-04-15
 
 ### Added
 
@@ -14,7 +14,7 @@ All notable changes to SynchroSonic will be documented in this file.
 ### Changed
 
 - Updated packaging naming conventions to include version and architecture consistently.
-- Release metadata now targets `v0.1.4` for the current shipping release.
+- Release metadata now targets `v0.1.5` for the current shipping release.
 
 ### Known Limitations
 

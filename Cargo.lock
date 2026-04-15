@@ -1016,7 +1016,7 @@ dependencies = [
 
 [[package]]
 name = "synchrosonic-app"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "flate2",
  "gtk4",
@@ -1036,7 +1036,7 @@ dependencies = [
 
 [[package]]
 name = "synchrosonic-audio"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "serde_json",
  "synchrosonic-core",
@@ -1046,7 +1046,7 @@ dependencies = [
 
 [[package]]
 name = "synchrosonic-core"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "serde",
  "tempfile",
@@ -1056,7 +1056,7 @@ dependencies = [
 
 [[package]]
 name = "synchrosonic-discovery"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "flume",
  "mdns-sd",
@@ -1067,7 +1067,7 @@ dependencies = [
 
 [[package]]
 name = "synchrosonic-receiver"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "flume",
  "synchrosonic-audio",
@@ -1077,7 +1077,7 @@ dependencies = [
 
 [[package]]
 name = "synchrosonic-transport"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "flume",
  "serde",

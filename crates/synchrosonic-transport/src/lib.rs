@@ -14,7 +14,7 @@ mod tests {
             Arc, Mutex,
         },
         thread,
-        time::Duration,
+        time::{Duration, Instant},
     };
 
     use synchrosonic_audio::{PlaybackEngine, PlaybackSink, PlaybackStartRequest};
@@ -308,7 +308,6 @@ mod tests {
                 "Sender",
             )
             .expect("first target should start");
-        thread::sleep(Duration::from_millis(150));
 
         sender
             .start(
@@ -325,9 +324,29 @@ mod tests {
                 "Sender",
             )
             .expect("second target should join active manager");
-        thread::sleep(Duration::from_millis(200));
-
+        let both_targets_streaming = wait_until(
+            Duration::from_secs(2),
+            Duration::from_millis(25),
+            || {
+                let snapshot = sender.snapshot();
+                snapshot.state == synchrosonic_core::StreamSessionState::Streaming
+                    && snapshot.targets.len() == 2
+                    && snapshot.targets.iter().all(|target| {
+                        target.state == synchrosonic_core::StreamSessionState::Streaming
+                    })
+                    && receiver_one_bytes.load(Ordering::SeqCst) > 0
+                    && receiver_two_bytes.load(Ordering::SeqCst) > 0
+            },
+        );
         let snapshot = sender.snapshot();
+        assert!(
+            both_targets_streaming,
+            "sender did not reach stable two-target streaming; receiver_one_bytes={}, receiver_two_bytes={}, sender_state={:?}, sender_snapshot={:?}",
+            receiver_one_bytes.load(Ordering::SeqCst),
+            receiver_two_bytes.load(Ordering::SeqCst),
+            snapshot.state,
+            snapshot
+        );
         assert_eq!(
             snapshot.state,
             synchrosonic_core::StreamSessionState::Streaming
@@ -340,13 +359,32 @@ mod tests {
         assert!(receiver_one_bytes.load(Ordering::SeqCst) > 0);
         assert!(receiver_two_bytes.load(Ordering::SeqCst) > 0);
 
+        let receiver_two_before = receiver_two_bytes.load(Ordering::SeqCst);
         sender
             .stop_target(&synchrosonic_core::DeviceId::new("receiver-1"))
             .expect("first target should stop independently");
-        let receiver_two_before = receiver_two_bytes.load(Ordering::SeqCst);
-        thread::sleep(Duration::from_millis(150));
+        let receiver_two_progressed_after_removal = wait_until(
+            Duration::from_secs(2),
+            Duration::from_millis(25),
+            || {
+                let snapshot = sender.snapshot();
+                snapshot.state == synchrosonic_core::StreamSessionState::Streaming
+                    && snapshot.targets.len() == 1
+                    && snapshot.targets[0].receiver_id.as_str() == "receiver-2"
+                    && receiver_two_bytes.load(Ordering::SeqCst) > receiver_two_before
+            },
+        );
 
         let snapshot_after = sender.snapshot();
+        assert!(
+            receiver_two_progressed_after_removal,
+            "receiver-2 did not continue receiving after receiver-1 was removed; before={}, after={}, sender_state={:?}, sender_snapshot={:?}, active_targets={:?}",
+            receiver_two_before,
+            receiver_two_bytes.load(Ordering::SeqCst),
+            snapshot_after.state,
+            snapshot_after,
+            snapshot_after.targets
+        );
         assert_eq!(
             snapshot_after.state,
             synchrosonic_core::StreamSessionState::Streaming
@@ -354,6 +392,44 @@ mod tests {
         assert_eq!(snapshot_after.targets.len(), 1);
         assert_eq!(snapshot_after.targets[0].receiver_id.as_str(), "receiver-2");
         assert!(receiver_two_bytes.load(Ordering::SeqCst) > receiver_two_before);
+
+        let mut receiver_one_last = receiver_one_bytes.load(Ordering::SeqCst);
+        let receiver_one_stabilized = wait_until(
+            Duration::from_secs(1),
+            Duration::from_millis(25),
+            || {
+                let current = receiver_one_bytes.load(Ordering::SeqCst);
+                let stabilized = current == receiver_one_last;
+                receiver_one_last = current;
+                stabilized
+            },
+        );
+        let receiver_one_before = receiver_one_bytes.load(Ordering::SeqCst);
+        let receiver_one_continued = wait_until(
+            Duration::from_millis(250),
+            Duration::from_millis(25),
+            || receiver_one_bytes.load(Ordering::SeqCst) > receiver_one_before,
+        );
+        let receiver_one_after = receiver_one_bytes.load(Ordering::SeqCst);
+        let snapshot_after_receiver_one_stop = sender.snapshot();
+        assert!(
+            receiver_one_stabilized,
+            "receiver-1 never stabilized after removal; before={}, after={}, sender_state={:?}, sender_snapshot={:?}, active_targets={:?}",
+            receiver_one_before,
+            receiver_one_after,
+            snapshot_after_receiver_one_stop.state,
+            snapshot_after_receiver_one_stop,
+            snapshot_after_receiver_one_stop.targets
+        );
+        assert!(
+            !receiver_one_continued,
+            "receiver-1 continued receiving after removal; before={}, after={}, sender_state={:?}, sender_snapshot={:?}, active_targets={:?}",
+            receiver_one_before,
+            receiver_one_after,
+            snapshot_after_receiver_one_stop.state,
+            snapshot_after_receiver_one_stop,
+            snapshot_after_receiver_one_stop.targets
+        );
 
         sender.stop().expect("sender manager should stop");
         receiver_one.shutdown();
@@ -480,5 +556,22 @@ mod tests {
             server,
             listen_addr,
         })
+    }
+
+    // Polling on real state keeps transport tests deterministic on slower CI runners
+    // where a fixed sleep can miss the exact moment work finishes.
+    fn wait_until(
+        timeout: Duration,
+        interval: Duration,
+        mut predicate: impl FnMut() -> bool,
+    ) -> bool {
+        let start = Instant::now();
+        while start.elapsed() < timeout {
+            if predicate() {
+                return true;
+            }
+            thread::sleep(interval);
+        }
+        predicate()
     }
 }

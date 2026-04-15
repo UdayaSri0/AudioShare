@@ -655,6 +655,12 @@ impl ManagedTargetSession {
     }
 }
 
+fn shutdown_target_session_async(session: ManagedTargetSession, reason: &'static str) {
+    thread::spawn(move || {
+        let _ = session.shutdown_with_stop(reason);
+    });
+}
+
 #[allow(clippy::large_enum_variant)]
 enum TargetSessionEntry {
     Pending(StreamTargetSnapshot),
@@ -939,7 +945,7 @@ where
                     if let Some(TargetSessionEntry::Active(session)) =
                         self.targets.remove(&device_id)
                     {
-                        let _ = session.shutdown_with_stop("sender removed target");
+                        shutdown_target_session_async(session, "sender removed target");
                     }
                 }
                 SenderCommand::SetLocalMirrorEnabled(enabled) => {
@@ -1001,8 +1007,10 @@ where
                 TargetConnectResult::Connected(session) => {
                     let device_id = session.target.receiver_id.clone();
                     if !self.targets.contains(&device_id) {
-                        let _ = session
-                            .shutdown_with_stop("sender target was removed before activation");
+                        shutdown_target_session_async(
+                            session,
+                            "sender target was removed before activation",
+                        );
                         continue;
                     }
 

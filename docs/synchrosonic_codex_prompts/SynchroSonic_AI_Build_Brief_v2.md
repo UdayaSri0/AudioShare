@@ -363,7 +363,7 @@ CI requirements:
 **Do NOT use `pip --break-system-packages` in postinst.**
 
 MVP packaging choice (pick one):
-A) Skip `.deb` for v0.1.0 and ship source + scripts (recommended for first public tag)
+A) Skip `.deb` for v0.1.0-rc.1 and ship source + scripts (recommended for first public tag)
 B) Proper `.deb`:
    - venv under `/opt/synchrosonic/venv`
    - build-time vendoring; postinst only wires desktop entry/services

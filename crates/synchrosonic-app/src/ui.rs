@@ -2333,6 +2333,12 @@ fn about_page() -> gtk::ScrolledWindow {
         metadata::APP_BINARY_NAME,
         metadata::APP_ICON_NAME
     ));
+    let release_channel_row = summary_row("Release channel");
+    release_channel_row.set_subtitle(&format!(
+        "{} · {}",
+        metadata::release_channel_label(),
+        metadata::release_channel_summary()
+    ));
     let developer_row = summary_row("Developers");
     developer_row.set_subtitle(&metadata::authors_display());
     let source_row = summary_row("Source and license");
@@ -2354,6 +2360,7 @@ fn about_page() -> gtk::ScrolledWindow {
     scope_row.set_subtitle("Bluetooth is treated as a local playback-output choice on Linux, not as a separate streaming transport or receiver discovery path.");
     about_group.add(&project_row);
     about_group.add(&version_row);
+    about_group.add(&release_channel_row);
     about_group.add(&developer_row);
     about_group.add(&source_row);
     about_group.add(&support_row);
@@ -3786,7 +3793,7 @@ mod tests {
         DiscoveredDevice {
             id: DeviceId::new(id),
             display_name: id.to_string(),
-            app_version: "0.1.0".to_string(),
+            app_version: env!("CARGO_PKG_VERSION").to_string(),
             protocol_version: synchrosonic_core::DISCOVERY_PROTOCOL_VERSION,
             capabilities: DeviceCapabilities::receiver(),
             availability,

@@ -412,7 +412,7 @@ mod tests {
         let device = DiscoveredDevice {
             id: DeviceId::new("receiver-1"),
             display_name: "Living Room".to_string(),
-            app_version: "0.1.0".to_string(),
+            app_version: env!("CARGO_PKG_VERSION").to_string(),
             protocol_version: crate::models::DISCOVERY_PROTOCOL_VERSION,
             capabilities: crate::models::DeviceCapabilities::receiver(),
             availability: crate::models::DeviceAvailability::Available,

@@ -127,7 +127,7 @@ build-backend = "setuptools.backends.legacy:build"
 
 [project]
 name = "synchrosonic"
-version = "0.1.0"
+version = "0.1.0-rc.1"
 description = "Synchronized multi-room audio streaming for Linux"
 license = { text = "GPL-3.0-or-later" }
 requires-python = ">=3.11"
@@ -1019,7 +1019,7 @@ def main() -> None:
 
     app = QApplication(sys.argv)
     app.setApplicationName("SynchroSonic")
-    app.setApplicationVersion("0.1.0")
+    app.setApplicationVersion("0.1.0-rc.1")
     app.setOrganizationName("SynchroSonic")
 
     # Load stylesheet
@@ -2114,7 +2114,7 @@ jobs:
 
 ```
 Package: synchrosonic
-Version: 0.1.0
+Version: 0.1.0-rc.1
 Architecture: amd64
 Maintainer: SynchroSonic Contributors <dev@synchrosonic.example>
 Depends: python3 (>= 3.11), python3-pip, snapserver, pipewire, pipewire-pulse, libgl1

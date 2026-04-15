@@ -12,9 +12,10 @@ choice, and first-pass Linux release metadata and packaging layouts.
 
 Current release posture:
 
+- First public tag target: `v0.1.0-rc.1`, to be published as a GitHub pre-release.
 - Native Linux release builds are supported.
 - The repository stages real native install, AppDir, and Debian filesystem layouts.
-- Final AppImage generation, Debian dependency metadata, and signing are not fully automated yet.
+- Final AppImage generation, Debian dependency metadata, signing, and a published private security-reporting path are not fully in place yet.
 
 ## Goals
 
@@ -100,6 +101,7 @@ Linux release assets now included in the repository:
 - staging script: `scripts/package-linux.sh`
 - packaging guide: `docs/linux-packaging.md`
 - release checklist: `docs/release-checklist.md`
+- changelog: `CHANGELOG.md`
 
 The packaging script produces:
 
@@ -109,6 +111,9 @@ The packaging script produces:
 
 These are real staging outputs, not pretend final installers. The remaining
 packaging gaps are documented in `docs/linux-packaging.md`.
+
+For the first public tag, those staged artifacts should be presented as preview
+assets for `v0.1.0-rc.1`, not as final signed installers.
 
 ## Community
 

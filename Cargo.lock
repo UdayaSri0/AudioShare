@@ -937,7 +937,7 @@ dependencies = [
 
 [[package]]
 name = "synchrosonic-app"
-version = "0.1.0"
+version = "0.1.0-rc.1"
 dependencies = [
  "gtk4",
  "libadwaita",
@@ -955,7 +955,7 @@ dependencies = [
 
 [[package]]
 name = "synchrosonic-audio"
-version = "0.1.0"
+version = "0.1.0-rc.1"
 dependencies = [
  "serde_json",
  "synchrosonic-core",
@@ -965,7 +965,7 @@ dependencies = [
 
 [[package]]
 name = "synchrosonic-core"
-version = "0.1.0"
+version = "0.1.0-rc.1"
 dependencies = [
  "serde",
  "tempfile",
@@ -975,7 +975,7 @@ dependencies = [
 
 [[package]]
 name = "synchrosonic-discovery"
-version = "0.1.0"
+version = "0.1.0-rc.1"
 dependencies = [
  "flume",
  "mdns-sd",
@@ -986,7 +986,7 @@ dependencies = [
 
 [[package]]
 name = "synchrosonic-receiver"
-version = "0.1.0"
+version = "0.1.0-rc.1"
 dependencies = [
  "flume",
  "synchrosonic-audio",
@@ -996,7 +996,7 @@ dependencies = [
 
 [[package]]
 name = "synchrosonic-transport"
-version = "0.1.0"
+version = "0.1.0-rc.1"
 dependencies = [
  "flume",
  "serde",

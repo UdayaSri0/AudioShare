@@ -6,6 +6,7 @@ Use this checklist before publishing a Linux release of SynchroSonic.
 
 - Confirm the root `LICENSE` file is present.
 - Decide whether to expand the current short-form GPL notice to the full license text.
+- Update [CHANGELOG.md](../CHANGELOG.md) for the release being tagged.
 - Review [README.md](../README.md) for version-specific wording.
 - Review [CONTRIBUTING.md](../CONTRIBUTING.md) and [SECURITY.md](../SECURITY.md).
 - Confirm issue templates reflect the current support expectations.
@@ -43,6 +44,7 @@ Use this checklist before publishing a Linux release of SynchroSonic.
 
 ## Release Publication
 
+- If stable blockers remain, publish the tag as a GitHub pre-release instead of a stable release.
 - Tag the release only after CI passes on the intended commit.
 - Upload only the artifacts that were actually produced and validated.
 - Include a release note summary of what Linux packaging means in that version.

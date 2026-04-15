@@ -14,6 +14,22 @@
   </provides>
   <url type="homepage">https://github.com/synchrosonic/synchrosonic</url>
   <url type="bugtracker">https://github.com/synchrosonic/synchrosonic/issues</url>
+  <releases>
+    <release version="0.1.0-rc.1" date="2026-04-15">
+      <description>
+        <p>
+          First public release candidate for the Rust/GTK SynchroSonic desktop
+          app on Linux.
+        </p>
+        <p>
+          This preview includes LAN discovery, system-audio capture, receiver
+          mode, synchronized multi-target casting, diagnostics, and staged Linux
+          packaging layouts for native install trees, AppDir, and Debian-style
+          filesystem inspection.
+        </p>
+      </description>
+    </release>
+  </releases>
   <description>
     <p>
       SynchroSonic is a Linux-first GTK4/libadwaita desktop application for
@@ -25,6 +41,11 @@
       The current release track focuses on Linux PipeWire tooling, LAN
       transport, and explicit diagnostics. Bluetooth support is intentionally
       limited to selecting local Linux playback outputs exposed by PipeWire.
+    </p>
+    <p>
+      The current public tag target is a release candidate rather than a stable
+      release because final signed packaging and a published private security
+      reporting path are not in place yet.
     </p>
   </description>
   <categories>

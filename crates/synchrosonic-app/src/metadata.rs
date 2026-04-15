@@ -19,3 +19,23 @@ pub fn authors_display() -> String {
         .collect::<Vec<_>>()
         .join(", ")
 }
+
+pub fn release_channel_label() -> &'static str {
+    if APP_VERSION.contains("-rc.") {
+        "Release candidate"
+    } else if APP_VERSION.contains('-') {
+        "Pre-release"
+    } else {
+        "Stable release"
+    }
+}
+
+pub fn release_channel_summary() -> &'static str {
+    if APP_VERSION.contains("-rc.") {
+        "This build is prepared as a public preview while stable packaging and security-reporting blockers are still being closed."
+    } else if APP_VERSION.contains('-') {
+        "This build is a pre-release and may still change before a stable public tag."
+    } else {
+        "This build is prepared as a stable public release."
+    }
+}

@@ -644,7 +644,7 @@ mod tests {
         let profile = LocalDiscoveryProfile::new(
             "device-1",
             "Receiver",
-            "0.1.0",
+            env!("CARGO_PKG_VERSION"),
             DeviceCapabilities::receiver(),
             DeviceAvailability::Available,
             51_700,
@@ -809,7 +809,7 @@ mod tests {
         DiscoveredDevice {
             id: DeviceId::new(id),
             display_name: name.to_string(),
-            app_version: "0.1.0".to_string(),
+            app_version: env!("CARGO_PKG_VERSION").to_string(),
             protocol_version: DISCOVERY_PROTOCOL_VERSION,
             capabilities: DeviceCapabilities::receiver(),
             availability: DeviceAvailability::Available,

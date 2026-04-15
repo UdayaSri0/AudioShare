@@ -6,8 +6,8 @@ Use this checklist before publishing a Linux release of SynchroSonic.
 
 - Confirm the root `LICENSE` file is present.
 - Decide whether to expand the current short-form GPL notice to the full license text.
-- Review [README.md](/home/strix/Documents/GitHub/AudioShare/README.md) for version-specific wording.
-- Review [CONTRIBUTING.md](/home/strix/Documents/GitHub/AudioShare/CONTRIBUTING.md) and [SECURITY.md](/home/strix/Documents/GitHub/AudioShare/SECURITY.md).
+- Review [README.md](../README.md) for version-specific wording.
+- Review [CONTRIBUTING.md](../CONTRIBUTING.md) and [SECURITY.md](../SECURITY.md).
 - Confirm issue templates reflect the current support expectations.
 
 ## Metadata And Assets
@@ -37,7 +37,7 @@ Use this checklist before publishing a Linux release of SynchroSonic.
 
 ## Documentation
 
-- Update [docs/linux-packaging.md](/home/strix/Documents/GitHub/AudioShare/docs/linux-packaging.md) if packaging scope changed.
+- Update [docs/linux-packaging.md](linux-packaging.md) if packaging scope changed.
 - Update screenshots in the README if real captures are available.
 - Confirm known limitations are documented honestly for Bluetooth, synchronization, and packaging.
 

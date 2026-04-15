@@ -3,7 +3,7 @@
 ## Workspace Overview
 
 The repository is a Rust workspace defined in the root
-[`Cargo.toml`](/home/strix/Documents/GitHub/AudioShare/Cargo.toml). The current
+[`Cargo.toml`](../../Cargo.toml). The current
 workspace members are:
 
 - `crates/synchrosonic-app`
@@ -130,4 +130,3 @@ Examples:
   receiver streaming behavior.
 - Look in `.github/workflows/ci.yml` before adding new local verification steps
   so the contributor workflow stays aligned with CI.
-

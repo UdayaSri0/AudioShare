@@ -52,6 +52,15 @@ events remove devices by service fullname. Stale entries are marked
 `Unavailable` through `prune_stale` instead of silently disappearing, which gives
 the UI a chance to show transient network loss.
 
+The current implementation also keeps discovery practical for remote-target
+selection:
+
+- duplicate updates that only refresh timestamps are suppressed
+- private/LAN endpoints are preferred over loopback and common Docker bridge
+  addresses
+- loopback-only or Docker-only announcements do not become selectable receiver
+  endpoints in the UI
+
 ## Developer Probe
 
 Run a local discovery probe with:
@@ -63,4 +72,3 @@ RUST_LOG=synchrosonic_discovery=debug cargo run -p synchrosonic-discovery --exam
 The probe advertises a temporary local SynchroSonic service, browses for matching
 services, prints discovery events, and prints the registry snapshot once per
 second.
-

@@ -1,5 +1,9 @@
 # SynchroSonic Codex Prompt Pack
 
+> Historical planning material: the current runnable repository is the Rust
+> workspace in `crates/`, not the older Python/PySide build-brief variants also
+> stored in this folder for reference.
+
 This ZIP contains the step-by-step prompts for building the Linux audio streaming / casting application in phases.
 
 ## Recommended order
@@ -21,4 +25,6 @@ After each phase, use:
 - `99_REVIEW_AFTER_EACH_PHASE.md`
 
 ## Included extras
-This ZIP also includes the uploaded SynchroSonic build brief files from this chat for reference.
+This ZIP also includes uploaded build brief files from earlier planning rounds.
+If a prompt in this folder conflicts with the current Rust/GTK implementation,
+follow the code and the top-level repository docs instead.

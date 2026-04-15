@@ -5,7 +5,7 @@
 Most commands in this repo are intended to be run from the workspace root:
 
 ```bash
-cd /path/to/AudioShare
+cd /path/to/synchrosonic
 ```
 
 ## What Runs Locally
@@ -111,4 +111,3 @@ RUST_LOG=synchrosonic_discovery=debug cargo run -p synchrosonic-discovery --exam
 
 These are especially useful when the full desktop app launches but audio
 capture or mDNS discovery does not behave as expected.
-

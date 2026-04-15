@@ -166,7 +166,8 @@ The runtime also logs:
 
 The GTK app now:
 
-- enables receiver mode in the in-memory app config for the current prototype
+- persists receiver settings in the shared app config and applies them to the
+  runtime
 - stores `ReceiverSnapshot` inside `AppState`
 - provides `Start Receiver` and `Stop Receiver` controls on the Receiver page
 - polls the runtime snapshot once per second to refresh the UI and app

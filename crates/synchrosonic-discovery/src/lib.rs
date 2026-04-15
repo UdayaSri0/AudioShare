@@ -128,14 +128,16 @@ impl MdnsDiscoveryService {
     fn handle_mdns_event(&mut self, event: ServiceEvent) -> Result<(), DiscoveryError> {
         match event {
             ServiceEvent::SearchStarted(service_type) => {
-                tracing::info!(service_type, "mDNS discovery browsing started");
+                tracing::trace!(service_type, "mDNS discovery browsing started");
             }
             ServiceEvent::ServiceFound(service_type, fullname) => {
                 tracing::debug!(service_type, fullname, "mDNS service found");
             }
             ServiceEvent::ServiceResolved(resolved) => {
                 let device = discovered_device_from_resolved(&resolved)?;
-                let event = self.registry.upsert(device);
+                let Some(event) = self.registry.upsert(device) else {
+                    return Ok(());
+                };
                 match &event {
                     DiscoveryEvent::DeviceDiscovered(device) => {
                         tracing::info!(
@@ -164,7 +166,7 @@ impl MdnsDiscoveryService {
                 }
             }
             ServiceEvent::SearchStopped(service_type) => {
-                tracing::info!(service_type, "mDNS discovery browsing stopped");
+                tracing::trace!(service_type, "mDNS discovery browsing stopped");
             }
             _ => {
                 tracing::debug!("ignored unknown mDNS service event");
@@ -308,17 +310,19 @@ impl DeviceRegistry {
         }
     }
 
-    pub fn upsert(&mut self, mut device: DiscoveredDevice) -> DiscoveryEvent {
+    pub fn upsert(&mut self, mut device: DiscoveredDevice) -> Option<DiscoveryEvent> {
         let device_id = device.id.clone();
         device.status = DeviceStatus::Discovered;
         device.last_seen_unix_ms = now_unix_ms();
 
         match self.devices.get_mut(&device_id) {
             Some(entry) => {
-                entry.device = merge_discovered_device(&entry.device, device.clone());
+                let merged = merge_discovered_device(&entry.device, device);
+                let changed = !materially_same_discovered_device(&entry.device, &merged);
+                entry.device = merged;
                 entry.last_seen = Instant::now();
                 entry.marked_stale = false;
-                DiscoveryEvent::DeviceUpdated(entry.device.clone())
+                changed.then(|| DiscoveryEvent::DeviceUpdated(entry.device.clone()))
             }
             None => {
                 self.devices.insert(
@@ -329,7 +333,7 @@ impl DeviceRegistry {
                         marked_stale: false,
                     },
                 );
-                DiscoveryEvent::DeviceDiscovered(device)
+                Some(DiscoveryEvent::DeviceDiscovered(device))
             }
         }
     }
@@ -518,6 +522,17 @@ fn merge_discovered_device(
     incoming
 }
 
+fn materially_same_discovered_device(
+    existing: &DiscoveredDevice,
+    incoming: &DiscoveredDevice,
+) -> bool {
+    let mut existing = existing.clone();
+    let mut incoming = incoming.clone();
+    existing.last_seen_unix_ms = 0;
+    incoming.last_seen_unix_ms = 0;
+    existing == incoming
+}
+
 fn select_preferred_endpoint<I>(
     device_id: &DeviceId,
     addresses: I,
@@ -554,6 +569,7 @@ where
 {
     addresses
         .into_iter()
+        .filter(|address| is_remote_selection_candidate(*address))
         .max_by_key(|address| endpoint_rank(*address))
 }
 
@@ -593,6 +609,20 @@ fn endpoint_rank(address: IpAddr) -> (u8, u8) {
 fn is_likely_docker_ipv4(address: Ipv4Addr) -> bool {
     let [first, second, ..] = address.octets();
     first == 172 && (17..=31).contains(&second)
+}
+
+fn is_remote_selection_candidate(address: IpAddr) -> bool {
+    match address {
+        IpAddr::V4(address) => {
+            !(address.is_loopback()
+                || address.is_unspecified()
+                || address.is_multicast()
+                || is_likely_docker_ipv4(address))
+        }
+        IpAddr::V6(address) => {
+            !(address.is_loopback() || address.is_unspecified() || address.is_multicast())
+        }
+    }
 }
 
 #[cfg(test)]
@@ -635,11 +665,11 @@ mod tests {
 
         assert!(matches!(
             registry.upsert(first),
-            DiscoveryEvent::DeviceDiscovered(_)
+            Some(DiscoveryEvent::DeviceDiscovered(_))
         ));
         assert!(matches!(
             registry.upsert(second),
-            DiscoveryEvent::DeviceUpdated(_)
+            Some(DiscoveryEvent::DeviceUpdated(_))
         ));
 
         let snapshot = registry.snapshot();
@@ -664,6 +694,20 @@ mod tests {
             endpoint.address,
             SocketAddr::from(([192, 168, 8, 127], 51_700))
         );
+    }
+
+    #[test]
+    fn preferred_endpoint_selection_returns_none_for_loopback_and_docker_only_addresses() {
+        let endpoint = select_preferred_endpoint(
+            &DeviceId::new("device-1"),
+            [
+                IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
+                IpAddr::V4(Ipv4Addr::new(172, 17, 0, 1)),
+            ],
+            51_700,
+        );
+
+        assert!(endpoint.is_none());
     }
 
     #[test]
@@ -730,6 +774,26 @@ mod tests {
             registry.snapshot().devices[0].availability,
             DeviceAvailability::Unavailable
         );
+    }
+
+    #[test]
+    fn registry_suppresses_duplicate_updates_without_material_changes() {
+        let mut registry = DeviceRegistry::new(Duration::from_secs(30));
+        let device = test_device_with_endpoint(
+            "device-1",
+            "Receiver",
+            "receiver._synchrosonic._tcp.local.",
+            Some(TransportEndpoint {
+                device_id: DeviceId::new("device-1"),
+                address: SocketAddr::from(([192, 168, 8, 127], 51_700)),
+            }),
+        );
+
+        assert!(matches!(
+            registry.upsert(device.clone()),
+            Some(DiscoveryEvent::DeviceDiscovered(_))
+        ));
+        assert_eq!(registry.upsert(device), None);
     }
 
     fn test_device(id: &str, name: &str, fullname: &str) -> DiscoveredDevice {

@@ -1,6 +1,6 @@
 # Developer Documentation
 
-This section is for contributors working on the AudioShare/SynchroSonic Rust
+This section is for contributors working on the SynchroSonic Rust
 workspace itself: the GTK desktop app, Linux audio backend, discovery,
 transport, receiver runtime, packaging, and CI verification flow.
 
@@ -54,4 +54,3 @@ unless a page says otherwise.
    ```bash
    bash scripts/package-linux.sh --skip-build
    ```
-

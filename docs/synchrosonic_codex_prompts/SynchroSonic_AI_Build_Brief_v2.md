@@ -1,4 +1,7 @@
 # SynchroSonic — Complete AI Agent Build Brief (v2 / Linux-first)
+> Historical/deprecated planning brief: this file describes an earlier
+> Python/PySide6 + Snapcast design, not the current Rust/GTK application in this
+> repository.
 > Copy this entire document into your coding agent (Cursor, Windsurf, Claude Code, etc.)
 > and instruct it to execute each phase in order, with zero skipping.
 

@@ -2,7 +2,7 @@
 
 ## Supported Development OS
 
-AudioShare is currently a Linux-first project.
+SynchroSonic is currently a Linux-first project.
 
 - Linux development is the only workflow implemented in the repository today.
 - GitHub Actions runs on `ubuntu-latest`.
@@ -112,4 +112,3 @@ dependencies, use:
 ```bash
 cargo check -p synchrosonic-app
 ```
-

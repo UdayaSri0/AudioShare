@@ -59,14 +59,14 @@ Please use the issue templates so reports include:
 - exact reproduction steps
 - diagnostic/log output when available
 
-Security-sensitive problems should follow [SECURITY.md](/home/strix/Documents/GitHub/AudioShare/SECURITY.md) instead of being filed publicly.
+Security-sensitive problems should follow [SECURITY.md](SECURITY.md) instead of being filed publicly.
 
 ## Documentation And Release Work
 
 Release-oriented changes should stay aligned with:
 
-- [docs/linux-packaging.md](/home/strix/Documents/GitHub/AudioShare/docs/linux-packaging.md)
-- [docs/release-checklist.md](/home/strix/Documents/GitHub/AudioShare/docs/release-checklist.md)
-- [docs/configuration.md](/home/strix/Documents/GitHub/AudioShare/docs/configuration.md)
+- [docs/linux-packaging.md](docs/linux-packaging.md)
+- [docs/release-checklist.md](docs/release-checklist.md)
+- [docs/configuration.md](docs/configuration.md)
 
 If you add a new dependency, packaging step, or support promise, update the relevant docs in the same change.

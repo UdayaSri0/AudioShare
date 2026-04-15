@@ -52,8 +52,15 @@ if [[ ! -x "$BINARY" ]]; then
     exit 1
 fi
 
-shlibs="$(dpkg-shlibdeps -O "$BINARY" | sed -n 's/^shlibs:Depends=//p')"
-misc="$(dpkg-shlibdeps -O "$BINARY" | sed -n 's/^misc:Depends=//p' || true)"
+# Create symlink for dpkg-shlibdeps to find debian/control
+mkdir -p "$DEB_ROOT/debian"
+ln -sf "../DEBIAN/control" "$DEB_ROOT/debian/control"
+
+# Calculate dependencies
+cd "$DEB_ROOT"
+shlibs="$(dpkg-shlibdeps -O "./usr/bin/$APP_BINARY" | sed -n 's/^shlibs:Depends=//p')"
+misc="$(dpkg-shlibdeps -O "./usr/bin/$APP_BINARY" | sed -n 's/^misc:Depends=//p' || true)"
+cd "$ROOT"
 
 if [[ -n "$misc" ]]; then
     deps="$shlibs, $misc"

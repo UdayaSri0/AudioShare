@@ -29,6 +29,6 @@ pub use receiver::{
 pub use state::{AppState, CastSessionState};
 pub use streaming::{
     LocalMirrorSnapshot, LocalMirrorState, StreamBranchBufferSnapshot, StreamCodec, StreamMetrics,
-    StreamSessionSnapshot, StreamSessionState, StreamTargetHealth, StreamTargetSnapshot,
-    STREAM_PROTOCOL_VERSION,
+    StreamSessionSnapshot, StreamSessionState, StreamTargetFailureKind, StreamTargetHealth,
+    StreamTargetSnapshot, STREAM_PROTOCOL_VERSION,
 };

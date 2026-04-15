@@ -119,6 +119,16 @@ pub enum StreamTargetHealth {
     Error,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum StreamTargetFailureKind {
+    Refused,
+    Timeout,
+    ResolveFailure,
+    ProtocolMismatch,
+    SelfTargetBlocked,
+    Unreachable,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StreamTargetSnapshot {
     pub receiver_id: DeviceId,
@@ -131,6 +141,9 @@ pub struct StreamTargetSnapshot {
     pub stream: Option<ReceiverStreamConfig>,
     pub network_buffer: StreamBranchBufferSnapshot,
     pub metrics: StreamMetrics,
+    pub attempt_count: u32,
+    pub next_retry_at_unix_ms: Option<u64>,
+    pub last_error_kind: Option<StreamTargetFailureKind>,
     pub last_error: Option<String>,
 }
 
@@ -151,6 +164,9 @@ impl StreamTargetSnapshot {
             stream: None,
             network_buffer: StreamBranchBufferSnapshot::default(),
             metrics: StreamMetrics::default(),
+            attempt_count: 0,
+            next_retry_at_unix_ms: None,
+            last_error_kind: None,
             last_error: None,
         }
     }

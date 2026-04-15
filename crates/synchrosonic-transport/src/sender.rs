@@ -13,8 +13,8 @@ use synchrosonic_core::{
     config::TransportConfig,
     services::{AudioBackend, AudioCapture},
     AudioError, CaptureSettings, DeviceId, LocalMirrorState, QualityPreset, ReceiverStreamConfig,
-    StreamCodec, StreamMetrics, StreamSessionSnapshot, StreamSessionState, StreamTargetHealth,
-    StreamTargetSnapshot, TransportEndpoint, TransportError,
+    StreamCodec, StreamMetrics, StreamSessionSnapshot, StreamSessionState, StreamTargetFailureKind,
+    StreamTargetHealth, StreamTargetSnapshot, TransportEndpoint, TransportError,
 };
 
 use crate::{
@@ -32,6 +32,7 @@ const BRANCH_IDLE_POLL_INTERVAL: Duration = Duration::from_millis(5);
 const MIN_BRANCH_QUEUE_PACKETS: usize = 4;
 const BRANCH_QUEUE_HEADROOM_PACKETS: usize = 2;
 const MAX_BRANCH_QUEUE_PACKETS: usize = 64;
+const MAX_CONNECT_ATTEMPTS: u32 = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SenderTarget {
@@ -58,6 +59,7 @@ pub struct LanSenderSession {
     config: TransportConfig,
     playback_engine: Arc<dyn PlaybackEngine>,
     local_playback_target_id: Option<String>,
+    local_device_id: Option<DeviceId>,
     snapshot: Arc<Mutex<StreamSessionSnapshot>>,
     control_tx: Option<Sender<SenderCommand>>,
     worker: Option<JoinHandle<()>>,
@@ -79,6 +81,7 @@ impl LanSenderSession {
             config,
             playback_engine,
             local_playback_target_id: None,
+            local_device_id: None,
             snapshot: Arc::new(Mutex::new(snapshot)),
             control_tx: None,
             worker: None,
@@ -128,6 +131,7 @@ impl LanSenderSession {
         let playback_engine = Arc::clone(&self.playback_engine);
         let initial_target = target.clone();
         let local_playback_target_id = self.local_playback_target_id.clone();
+        let local_device_id = self.local_device_id.clone();
 
         let mut seeded_snapshot = StreamSessionSnapshot {
             session_id: Some(manager_session_id.clone()),
@@ -145,7 +149,7 @@ impl LanSenderSession {
             Some(self.playback_engine.backend_name().to_string());
         seeded_snapshot
             .targets
-            .push(pending_target_snapshot(&initial_target));
+            .push(pending_target_snapshot(&initial_target, 0));
         seeded_snapshot.state = StreamSessionState::Connecting;
         sync_snapshot(&self.snapshot, seeded_snapshot);
 
@@ -158,6 +162,7 @@ impl LanSenderSession {
                 sender_name,
                 manager_session_id,
                 local_playback_target_id,
+                local_device_id,
                 snapshot,
                 control_rx,
             );
@@ -221,6 +226,13 @@ impl LanSenderSession {
         Ok(())
     }
 
+    pub fn set_local_device_id(&mut self, device_id: DeviceId) {
+        self.local_device_id = Some(device_id.clone());
+        if let Some(control_tx) = &self.control_tx {
+            let _ = control_tx.send(SenderCommand::SetLocalDeviceId(device_id));
+        }
+    }
+
     pub fn set_quality_preset(&mut self, quality: QualityPreset) -> Result<(), TransportError> {
         self.config.quality = quality;
 
@@ -263,6 +275,7 @@ enum SenderCommand {
     RemoveTarget(DeviceId),
     SetLocalMirrorEnabled(bool),
     SetLocalMirrorTarget(Option<String>),
+    SetLocalDeviceId(DeviceId),
     SetQualityPreset(QualityPreset),
     Shutdown,
 }
@@ -383,9 +396,24 @@ impl ManagedTargetSession {
     #[allow(clippy::result_large_err)]
     fn connect(
         target: SenderTarget,
+        attempt_count: u32,
         request: &TargetConnectRequest,
-    ) -> Result<Self, StreamTargetSnapshot> {
-        let mut snapshot = pending_target_snapshot(&target);
+    ) -> Result<Self, TargetConnectFailure> {
+        let mut snapshot = pending_target_snapshot(&target, attempt_count);
+        if request
+            .local_device_id
+            .as_ref()
+            .is_some_and(|local_device_id| local_device_id == &target.receiver_id)
+        {
+            return Err(connect_failure(
+                target,
+                snapshot,
+                StreamTargetFailureKind::SelfTargetBlocked,
+                "self-target connections are blocked".to_string(),
+                false,
+            ));
+        }
+
         let session_id = format!(
             "{}-{}-{}",
             request.manager_session_id,
@@ -396,29 +424,31 @@ impl ManagedTargetSession {
         let mut stream =
             TcpStream::connect_timeout(&target.endpoint.address, request.connect_timeout).map_err(
                 |source| {
-                    snapshot.state = StreamSessionState::Error;
-                    snapshot.health = StreamTargetHealth::Unreachable;
-                    snapshot.last_error = Some(
-                        TransportError::Connect {
-                            address: target.endpoint.address.to_string(),
-                            source,
-                        }
-                        .to_string(),
-                    );
-                    snapshot.clone()
+                    let error = TransportError::Connect {
+                        address: target.endpoint.address.to_string(),
+                        source,
+                    };
+                    connect_failure(
+                        target.clone(),
+                        snapshot.clone(),
+                        classify_connect_error(&error),
+                        error.to_string(),
+                        true,
+                    )
                 },
             )?;
         stream.set_nodelay(true).map_err(|source| {
-            snapshot.state = StreamSessionState::Error;
-            snapshot.health = StreamTargetHealth::Error;
-            snapshot.last_error = Some(
-                TransportError::Io {
-                    context: format!("enabling TCP_NODELAY for {}", target.endpoint.address),
-                    source,
-                }
-                .to_string(),
-            );
-            snapshot.clone()
+            let error = TransportError::Io {
+                context: format!("enabling TCP_NODELAY for {}", target.endpoint.address),
+                source,
+            };
+            connect_failure(
+                target.clone(),
+                snapshot.clone(),
+                StreamTargetFailureKind::Unreachable,
+                error.to_string(),
+                true,
+            )
         })?;
 
         snapshot.state = StreamSessionState::Negotiating;
@@ -433,38 +463,53 @@ impl ManagedTargetSession {
         );
         snapshot.metrics.bytes_sent += write_message(&mut stream, FrameKind::Hello, &hello, &[])
             .map_err(|error| {
-                snapshot.state = StreamSessionState::Error;
-                snapshot.health = StreamTargetHealth::Error;
-                snapshot.last_error = Some(error.to_string());
-                snapshot.clone()
+                connect_failure(
+                    target.clone(),
+                    snapshot.clone(),
+                    StreamTargetFailureKind::ProtocolMismatch,
+                    error.to_string(),
+                    false,
+                )
             })? as u64;
 
         let accept_frame = read_frame(&mut stream).map_err(|error| {
-            snapshot.state = StreamSessionState::Error;
-            snapshot.health = StreamTargetHealth::Unreachable;
-            snapshot.last_error = Some(error.to_string());
-            snapshot.clone()
+            connect_failure(
+                target.clone(),
+                snapshot.clone(),
+                StreamTargetFailureKind::Unreachable,
+                error.to_string(),
+                true,
+            )
         })?;
         snapshot.metrics.bytes_received += accept_frame.wire_bytes as u64;
         snapshot.metrics.packets_received += 1;
         if accept_frame.kind != FrameKind::Accept {
-            snapshot.state = StreamSessionState::Error;
-            snapshot.health = StreamTargetHealth::Error;
-            snapshot.last_error = Some("receiver did not respond with Accept".to_string());
-            return Err(snapshot);
+            return Err(connect_failure(
+                target,
+                snapshot,
+                StreamTargetFailureKind::ProtocolMismatch,
+                "receiver did not respond with Accept".to_string(),
+                false,
+            ));
         }
 
         let accept: AcceptMessage = decode_metadata(&accept_frame).map_err(|error| {
-            snapshot.state = StreamSessionState::Error;
-            snapshot.health = StreamTargetHealth::Error;
-            snapshot.last_error = Some(error.to_string());
-            snapshot.clone()
+            connect_failure(
+                target.clone(),
+                snapshot.clone(),
+                StreamTargetFailureKind::ProtocolMismatch,
+                error.to_string(),
+                false,
+            )
         })?;
         validate_accept(&accept, &session_id, &request.stream_config).map_err(|error| {
-            snapshot.state = StreamSessionState::Error;
-            snapshot.health = StreamTargetHealth::Error;
-            snapshot.last_error = Some(error.to_string());
-            snapshot.clone()
+            connect_failure(
+                target.clone(),
+                snapshot.clone(),
+                StreamTargetFailureKind::ProtocolMismatch,
+                error.to_string(),
+                false,
+            )
         })?;
 
         snapshot.session_id = Some(session_id);
@@ -472,38 +517,41 @@ impl ManagedTargetSession {
         snapshot.stream = Some(accept.stream.clone());
         snapshot.state = StreamSessionState::Streaming;
         snapshot.health = StreamTargetHealth::Healthy;
+        snapshot.last_error_kind = None;
         snapshot.last_error = None;
 
         let queue_capacity =
             branch_queue_capacity(accept.stream.packet_duration(), request.target_latency_ms);
         let network_branch = NetworkBranch::new(
             stream.try_clone().map_err(|source| {
-                snapshot.state = StreamSessionState::Error;
-                snapshot.health = StreamTargetHealth::Error;
-                snapshot.last_error = Some(
-                    TransportError::Io {
-                        context: format!("cloning TCP stream for {}", target.endpoint.address),
-                        source,
-                    }
-                    .to_string(),
-                );
-                snapshot.clone()
+                let error = TransportError::Io {
+                    context: format!("cloning TCP stream for {}", target.endpoint.address),
+                    source,
+                };
+                connect_failure(
+                    target.clone(),
+                    snapshot.clone(),
+                    StreamTargetFailureKind::Unreachable,
+                    error.to_string(),
+                    true,
+                )
             })?,
             queue_capacity,
         );
         snapshot.network_buffer = network_branch.snapshot();
 
         let read_stream = stream.try_clone().map_err(|source| {
-            snapshot.state = StreamSessionState::Error;
-            snapshot.health = StreamTargetHealth::Error;
-            snapshot.last_error = Some(
-                TransportError::Io {
-                    context: format!("cloning TCP stream for {}", target.endpoint.address),
-                    source,
-                }
-                .to_string(),
-            );
-            snapshot.clone()
+            let error = TransportError::Io {
+                context: format!("cloning TCP stream for {}", target.endpoint.address),
+                source,
+            };
+            connect_failure(
+                target.clone(),
+                snapshot.clone(),
+                StreamTargetFailureKind::Unreachable,
+                error.to_string(),
+                true,
+            )
         })?;
         let (inbound_tx, inbound_rx) = flume::unbounded();
         let reader = thread::spawn(move || sender_reader_loop(read_stream, inbound_tx));
@@ -661,9 +709,44 @@ fn shutdown_target_session_async(session: ManagedTargetSession, reason: &'static
     });
 }
 
+struct PendingTargetSession {
+    target: SenderTarget,
+    snapshot: StreamTargetSnapshot,
+    next_attempt_at: Instant,
+    in_flight: bool,
+}
+
+impl PendingTargetSession {
+    fn new(target: SenderTarget) -> Self {
+        Self {
+            snapshot: pending_target_snapshot(&target, 0),
+            target,
+            next_attempt_at: Instant::now(),
+            in_flight: false,
+        }
+    }
+
+    fn schedule_retry(&mut self, snapshot: StreamTargetSnapshot, backoff: Duration) {
+        self.snapshot = snapshot;
+        self.snapshot.next_retry_at_unix_ms =
+            Some(now_unix_ms().saturating_add(backoff.as_millis() as u64));
+        self.next_attempt_at = Instant::now() + backoff;
+        self.in_flight = false;
+    }
+
+    fn mark_in_flight(&mut self) -> u32 {
+        self.in_flight = true;
+        self.snapshot.state = StreamSessionState::Connecting;
+        self.snapshot.health = StreamTargetHealth::Pending;
+        self.snapshot.next_retry_at_unix_ms = None;
+        self.snapshot.attempt_count = self.snapshot.attempt_count.saturating_add(1);
+        self.snapshot.attempt_count
+    }
+}
+
 #[allow(clippy::large_enum_variant)]
 enum TargetSessionEntry {
-    Pending(StreamTargetSnapshot),
+    Pending(PendingTargetSession),
     Active(ManagedTargetSession),
     Failed(StreamTargetSnapshot),
 }
@@ -671,14 +754,16 @@ enum TargetSessionEntry {
 impl TargetSessionEntry {
     fn snapshot(&self) -> StreamTargetSnapshot {
         match self {
-            Self::Pending(snapshot) | Self::Failed(snapshot) => snapshot.clone(),
+            Self::Pending(pending) => pending.snapshot.clone(),
+            Self::Failed(snapshot) => snapshot.clone(),
             Self::Active(session) => session.snapshot(),
         }
     }
 
     fn state(&self) -> StreamSessionState {
         match self {
-            Self::Pending(snapshot) | Self::Failed(snapshot) => snapshot.state,
+            Self::Pending(pending) => pending.snapshot.state,
+            Self::Failed(snapshot) => snapshot.state,
             Self::Active(session) => session.snapshot.state,
         }
     }
@@ -695,10 +780,10 @@ impl TargetSessionCollection {
         }
     }
 
-    fn insert_pending(&mut self, snapshot: StreamTargetSnapshot) {
+    fn insert_pending(&mut self, pending: PendingTargetSession) {
         self.entries.insert(
-            snapshot.receiver_id.clone(),
-            TargetSessionEntry::Pending(snapshot),
+            pending.target.receiver_id.clone(),
+            TargetSessionEntry::Pending(pending),
         );
     }
 
@@ -760,6 +845,27 @@ impl TargetSessionCollection {
         }
     }
 
+    fn pending_mut(&mut self, device_id: &DeviceId) -> Option<&mut PendingTargetSession> {
+        match self.entries.get_mut(device_id) {
+            Some(TargetSessionEntry::Pending(pending)) => Some(pending),
+            _ => None,
+        }
+    }
+
+    fn due_pending_targets(&self, now: Instant) -> Vec<DeviceId> {
+        self.entries
+            .iter()
+            .filter_map(|(device_id, entry)| match entry {
+                TargetSessionEntry::Pending(pending)
+                    if !pending.in_flight && pending.next_attempt_at <= now =>
+                {
+                    Some(device_id.clone())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
     fn collect_snapshots(&self) -> Vec<StreamTargetSnapshot> {
         let mut snapshots = self
             .entries
@@ -783,12 +889,21 @@ struct TargetConnectRequest {
     quality: synchrosonic_core::QualityPreset,
     target_latency_ms: u16,
     heartbeat_interval_ms: u16,
+    local_device_id: Option<DeviceId>,
 }
 
 #[allow(clippy::large_enum_variant)]
 enum TargetConnectResult {
     Connected(ManagedTargetSession),
-    Failed(StreamTargetSnapshot),
+    Failed(TargetConnectFailure),
+}
+
+#[derive(Debug, Clone)]
+struct TargetConnectFailure {
+    target: SenderTarget,
+    snapshot: StreamTargetSnapshot,
+    failure_kind: StreamTargetFailureKind,
+    retryable: bool,
 }
 
 struct SenderManager<B> {
@@ -822,6 +937,7 @@ where
         sender_name: String,
         manager_session_id: String,
         local_playback_target_id: Option<String>,
+        local_device_id: Option<DeviceId>,
         snapshot: Arc<Mutex<StreamSessionSnapshot>>,
         control_rx: Receiver<SenderCommand>,
     ) -> Self {
@@ -847,6 +963,7 @@ where
             quality: config.quality,
             target_latency_ms: config.target_latency_ms,
             heartbeat_interval_ms: config.heartbeat_interval_ms,
+            local_device_id,
         };
 
         let mut shared_snapshot = StreamSessionSnapshot {
@@ -892,6 +1009,7 @@ where
                 break;
             }
 
+            self.process_pending_targets();
             self.process_connect_results();
             self.process_local_mirror_events();
             self.tick_targets();
@@ -916,22 +1034,40 @@ where
             return;
         }
 
-        let pending_snapshot = pending_target_snapshot(&target);
-        self.targets.insert_pending(pending_snapshot);
-        let connect_request = self.connect_request.clone();
-        let connect_tx = self.connect_tx.clone();
+        self.targets
+            .insert_pending(PendingTargetSession::new(target.clone()));
         tracing::info!(
             receiver_id = %target.receiver_id,
             endpoint = %target.endpoint.address,
             "queueing multi-device sender target connection"
         );
-        thread::spawn(move || {
-            let result = ManagedTargetSession::connect(target, &connect_request);
-            let _ = match result {
-                Ok(session) => connect_tx.send(TargetConnectResult::Connected(session)),
-                Err(snapshot) => connect_tx.send(TargetConnectResult::Failed(snapshot)),
+    }
+
+    fn process_pending_targets(&mut self) {
+        let connect_request = self.connect_request.clone();
+        let connect_tx = self.connect_tx.clone();
+        for device_id in self.targets.due_pending_targets(Instant::now()) {
+            let Some(pending) = self.targets.pending_mut(&device_id) else {
+                continue;
             };
-        });
+            let attempt_count = pending.mark_in_flight();
+            let target = pending.target.clone();
+            tracing::info!(
+                receiver_id = %target.receiver_id,
+                endpoint = %target.endpoint.address,
+                attempt = attempt_count,
+                "starting sender target connection attempt"
+            );
+            let connect_request = connect_request.clone();
+            let connect_tx = connect_tx.clone();
+            thread::spawn(move || {
+                let result = ManagedTargetSession::connect(target, attempt_count, &connect_request);
+                let _ = match result {
+                    Ok(session) => connect_tx.send(TargetConnectResult::Connected(session)),
+                    Err(failure) => connect_tx.send(TargetConnectResult::Failed(failure)),
+                };
+            });
+        }
     }
 
     fn process_commands(&mut self) -> bool {
@@ -987,6 +1123,9 @@ where
                         }
                     }
                 }
+                SenderCommand::SetLocalDeviceId(device_id) => {
+                    self.connect_request.local_device_id = Some(device_id);
+                }
                 SenderCommand::SetQualityPreset(quality) => {
                     self.config.quality = quality;
                     self.connect_request.quality = quality;
@@ -1026,18 +1165,35 @@ where
                         self.fail_all_active_targets(error.to_string());
                     }
                 }
-                TargetConnectResult::Failed(snapshot) => {
-                    if !self.targets.contains(&snapshot.receiver_id) {
+                TargetConnectResult::Failed(failure) => {
+                    if !self.targets.contains(&failure.snapshot.receiver_id) {
                         continue;
                     }
 
+                    let snapshot = failure.snapshot.clone();
                     tracing::warn!(
-                        receiver_id = %snapshot.receiver_id,
+                        receiver_id = %failure.target.receiver_id,
+                        endpoint = %failure.target.endpoint.address,
+                        attempt = snapshot.attempt_count,
+                        error_kind = ?failure.failure_kind,
                         error = %snapshot.last_error.as_deref().unwrap_or("unknown connection error"),
                         "sender target connection failed"
                     );
                     self.shared_snapshot.last_error = snapshot.last_error.clone();
-                    self.targets.insert_failed(snapshot);
+                    if failure.retryable && snapshot.attempt_count < MAX_CONNECT_ATTEMPTS {
+                        let backoff = retry_backoff(snapshot.attempt_count);
+                        if let Some(pending) = self.targets.pending_mut(&snapshot.receiver_id) {
+                            pending.schedule_retry(snapshot.clone(), backoff);
+                        }
+                        tracing::info!(
+                            receiver_id = %snapshot.receiver_id,
+                            endpoint = %snapshot.endpoint,
+                            next_retry_in_ms = backoff.as_millis() as u64,
+                            "scheduled sender target retry after connection failure"
+                        );
+                    } else {
+                        self.targets.insert_failed(snapshot);
+                    }
                 }
             }
         }
@@ -1258,6 +1414,7 @@ impl Clone for TargetConnectRequest {
             quality: self.quality,
             target_latency_ms: self.target_latency_ms,
             heartbeat_interval_ms: self.heartbeat_interval_ms,
+            local_device_id: self.local_device_id.clone(),
         }
     }
 }
@@ -1457,7 +1614,50 @@ fn validate_accept(
     Ok(())
 }
 
-fn pending_target_snapshot(target: &SenderTarget) -> StreamTargetSnapshot {
+fn connect_failure(
+    target: SenderTarget,
+    mut snapshot: StreamTargetSnapshot,
+    failure_kind: StreamTargetFailureKind,
+    message: String,
+    retryable: bool,
+) -> TargetConnectFailure {
+    snapshot.state = StreamSessionState::Error;
+    snapshot.health = match failure_kind {
+        StreamTargetFailureKind::ProtocolMismatch | StreamTargetFailureKind::SelfTargetBlocked => {
+            StreamTargetHealth::Error
+        }
+        _ => StreamTargetHealth::Unreachable,
+    };
+    snapshot.last_error_kind = Some(failure_kind);
+    snapshot.last_error = Some(message);
+    TargetConnectFailure {
+        target,
+        snapshot,
+        failure_kind,
+        retryable,
+    }
+}
+
+fn classify_connect_error(error: &TransportError) -> StreamTargetFailureKind {
+    match error {
+        TransportError::Connect { source, .. } => match source.kind() {
+            ErrorKind::ConnectionRefused => StreamTargetFailureKind::Refused,
+            ErrorKind::TimedOut => StreamTargetFailureKind::Timeout,
+            _ => StreamTargetFailureKind::Unreachable,
+        },
+        _ => StreamTargetFailureKind::Unreachable,
+    }
+}
+
+fn retry_backoff(attempt_count: u32) -> Duration {
+    match attempt_count {
+        0 | 1 => Duration::from_millis(500),
+        2 => Duration::from_millis(1_500),
+        _ => Duration::from_millis(3_000),
+    }
+}
+
+fn pending_target_snapshot(target: &SenderTarget, attempt_count: u32) -> StreamTargetSnapshot {
     let mut snapshot = StreamTargetSnapshot::new(
         target.receiver_id.clone(),
         target.receiver_name.clone(),
@@ -1465,6 +1665,7 @@ fn pending_target_snapshot(target: &SenderTarget) -> StreamTargetSnapshot {
     );
     snapshot.state = StreamSessionState::Connecting;
     snapshot.health = StreamTargetHealth::Pending;
+    snapshot.attempt_count = attempt_count;
     snapshot
 }
 
@@ -1499,7 +1700,7 @@ fn derive_manager_state(targets: &[StreamTargetSnapshot]) -> StreamSessionState 
         matches!(
             target.state,
             StreamSessionState::Connecting | StreamSessionState::Negotiating
-        )
+        ) || target.next_retry_at_unix_ms.is_some()
     }) {
         return StreamSessionState::Connecting;
     }

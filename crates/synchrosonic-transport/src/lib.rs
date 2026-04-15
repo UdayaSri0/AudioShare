@@ -9,6 +9,7 @@ pub use sender::{LanSenderSession, SenderTarget};
 #[cfg(test)]
 mod tests {
     use std::{
+        net::TcpListener,
         sync::{
             atomic::{AtomicUsize, Ordering},
             Arc, Mutex,
@@ -21,7 +22,7 @@ mod tests {
     use synchrosonic_core::{
         services::{AudioBackend, AudioCapture, ReceiverService},
         AudioError, AudioFrame, AudioSource, CaptureSettings, CaptureStats, PlaybackTarget,
-        ReceiverError, ReceiverTransportEvent,
+        ReceiverError, ReceiverTransportEvent, StreamTargetFailureKind,
     };
     use synchrosonic_receiver::ReceiverRuntime;
 
@@ -512,6 +513,91 @@ mod tests {
             sender.snapshot().state,
             synchrosonic_core::StreamSessionState::Idle
         );
+    }
+
+    #[test]
+    fn sender_blocks_self_target_connections() {
+        let mut sender =
+            LanSenderSession::new(synchrosonic_core::config::TransportConfig::default());
+        sender.set_local_device_id(synchrosonic_core::DeviceId::new("self-device"));
+
+        sender
+            .start(
+                MockAudioBackend {
+                    frames: Arc::new(Mutex::new(Vec::new())),
+                },
+                CaptureSettings::default(),
+                SenderTarget::new(
+                    synchrosonic_core::DeviceId::new("self-device"),
+                    "Self",
+                    synchrosonic_core::TransportEndpoint {
+                        device_id: synchrosonic_core::DeviceId::new("self-device"),
+                        address: std::net::SocketAddr::from(([127, 0, 0, 1], 51_700)),
+                    },
+                ),
+                "Sender",
+            )
+            .expect("sender manager should start");
+
+        let blocked = wait_until(Duration::from_secs(1), Duration::from_millis(25), || {
+            let snapshot = sender.snapshot();
+            snapshot.targets.first().is_some_and(|target| {
+                target.last_error_kind == Some(StreamTargetFailureKind::SelfTargetBlocked)
+                    && target.attempt_count == 1
+                    && target.state == synchrosonic_core::StreamSessionState::Error
+            })
+        });
+
+        assert!(
+            blocked,
+            "sender did not mark self-target as blocked: {:?}",
+            sender.snapshot()
+        );
+        sender.stop().expect("sender should stop");
+    }
+
+    #[test]
+    fn sender_retries_refused_connections_with_bounded_backoff() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("ephemeral listener should bind");
+        let unused_port = listener.local_addr().expect("listener addr").port();
+        drop(listener);
+
+        let mut sender =
+            LanSenderSession::new(synchrosonic_core::config::TransportConfig::default());
+        sender
+            .start(
+                MockAudioBackend {
+                    frames: Arc::new(Mutex::new(Vec::new())),
+                },
+                CaptureSettings::default(),
+                SenderTarget::new(
+                    synchrosonic_core::DeviceId::new("receiver-refused"),
+                    "Receiver Refused",
+                    synchrosonic_core::TransportEndpoint {
+                        device_id: synchrosonic_core::DeviceId::new("receiver-refused"),
+                        address: std::net::SocketAddr::from(([127, 0, 0, 1], unused_port)),
+                    },
+                ),
+                "Sender",
+            )
+            .expect("sender manager should start");
+
+        let exhausted = wait_until(Duration::from_secs(6), Duration::from_millis(50), || {
+            let snapshot = sender.snapshot();
+            snapshot.targets.first().is_some_and(|target| {
+                target.last_error_kind == Some(StreamTargetFailureKind::Refused)
+                    && target.attempt_count >= 3
+                    && target.state == synchrosonic_core::StreamSessionState::Error
+                    && target.next_retry_at_unix_ms.is_none()
+            })
+        });
+
+        assert!(
+            exhausted,
+            "sender did not stop retrying after bounded refused attempts: {:?}",
+            sender.snapshot()
+        );
+        sender.stop().expect("sender should stop");
     }
 
     struct SpawnedReceiver {

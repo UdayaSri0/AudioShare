@@ -10,7 +10,7 @@ use std::{
         Arc, Mutex,
     },
     thread,
-    time::Instant,
+    time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
 use adw::prelude::*;
@@ -29,7 +29,10 @@ use synchrosonic_receiver::ReceiverRuntime;
 use synchrosonic_transport::{LanReceiverTransportServer, LanSenderSession, SenderTarget};
 
 use crate::{
-    diagnostics::{DiagnosticsRuntime, PollKind, PollObservation, RuntimeStateView},
+    browser_join::{BrowserJoinPrototypeService, BrowserJoinSnapshot},
+    diagnostics::{
+        DiagnosticsRuntime, PollKind, PollObservation, RuntimeStateView, SubsystemSnapshot,
+    },
     logging::{LogStore, StructuredLogEntry},
     metadata,
     persistence::{export_config, import_config, save_active_config, AppPaths},
@@ -74,10 +77,57 @@ struct UiRefreshGuards {
     receiver_selector_refreshing: Rc<Cell<bool>>,
 }
 
+#[derive(Debug, Clone, Default)]
+struct UiRenderCache {
+    last_state: Option<AppState>,
+    last_logs: Vec<StructuredLogEntry>,
+    last_view_name: Option<String>,
+    last_browser_join_snapshot: Option<BrowserJoinSnapshot>,
+    discovery_rows: Vec<DiscoveryRowModel>,
+    casting_rows: Vec<CastingTargetRowModel>,
+    audio_source_rows: Vec<InventoryRowModel>,
+    audio_output_rows: Vec<InventoryRowModel>,
+    diagnostics_rows: Vec<SimpleRowModel>,
+    log_rows: Vec<SimpleRowModel>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DiscoveryRowModel {
+    device_id: DeviceId,
+    title: String,
+    subtitle: String,
+    icon_name: &'static str,
+    button_label: Option<String>,
+    button_sensitive: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CastingTargetRowModel {
+    device_id: DeviceId,
+    title: String,
+    subtitle: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct InventoryRowModel {
+    title: String,
+    subtitle: String,
+    icon_name: &'static str,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SimpleRowModel {
+    title: String,
+    subtitle: String,
+    icon_name: &'static str,
+}
+
 #[derive(Clone)]
 struct UiController {
     state: Rc<RefCell<AppState>>,
     audio_backend: LinuxAudioBackend,
+    discovery: Arc<Mutex<MdnsDiscoveryService>>,
+    browser_join: Arc<Mutex<BrowserJoinPrototypeService>>,
     sender: Arc<Mutex<LanSenderSession>>,
     receiver: Arc<Mutex<ReceiverRuntime>>,
     receiver_transport: Arc<Mutex<LanReceiverTransportServer>>,
@@ -88,6 +138,7 @@ struct UiController {
     log_store: LogStore,
     diagnostics_runtime: DiagnosticsRuntime,
     refresh_guards: UiRefreshGuards,
+    render_cache: Rc<RefCell<UiRenderCache>>,
 }
 
 #[derive(Clone)]
@@ -152,7 +203,11 @@ struct ReceiverWidgets {
     output_selector: gtk::ComboBoxText,
     start_button: gtk::Button,
     stop_button: gtk::Button,
+    join_summary_row: adw::ActionRow,
+    generate_join_link_button: gtk::Button,
+    open_join_prototype_button: gtk::Button,
     state_row: adw::ActionRow,
+    advertisement_row: adw::ActionRow,
     connection_row: adw::ActionRow,
     sync_row: adw::ActionRow,
     detail_label: gtk::Label,
@@ -198,13 +253,12 @@ pub fn build_main_window(app: &adw::Application, launch: UiLaunchContext) {
     let audio_backend = LinuxAudioBackend::new();
     let mut state = AppState::new(config.clone());
     state.diagnostics.extend(launch.startup_diagnostics.clone());
-    refresh_audio_inventory(&audio_backend, &mut state);
 
-    let mut discovery = MdnsDiscoveryService::new(
+    let discovery = Arc::new(Mutex::new(MdnsDiscoveryService::new(
         config.discovery.clone(),
         config.receiver.advertised_name.clone(),
-    );
-    let discovery_started = match discovery.start() {
+    )));
+    let discovery_started = match discovery.lock().expect("discovery mutex").start() {
         Ok(()) => true,
         Err(error) => {
             state.diagnostics.push(DiagnosticEvent::warning(
@@ -214,7 +268,7 @@ pub fn build_main_window(app: &adw::Application, launch: UiLaunchContext) {
             false
         }
     };
-    state.apply_discovery_snapshot(discovery.snapshot());
+    state.apply_discovery_snapshot(discovery.lock().expect("discovery mutex").snapshot());
 
     let receiver = Arc::new(Mutex::new(ReceiverRuntime::new(config.receiver.clone())));
     let receiver_transport = Arc::new(Mutex::new(LanReceiverTransportServer::new(
@@ -223,11 +277,19 @@ pub fn build_main_window(app: &adw::Application, launch: UiLaunchContext) {
         config.receiver.latency_preset,
         config.transport.heartbeat_interval_ms,
     )));
+    let browser_join = Arc::new(Mutex::new(BrowserJoinPrototypeService::new()));
     let sender = Arc::new(Mutex::new(LanSenderSession::new(config.transport.clone())));
     {
         let mut sender = sender.lock().expect("sender session mutex");
         let _ = sender.set_local_playback_target(config.audio.local_playback_target_id.clone());
         let _ = sender.set_quality_preset(config.transport.quality);
+        sender.set_local_device_id(
+            discovery
+                .lock()
+                .expect("discovery mutex")
+                .local_device_id()
+                .clone(),
+        );
     }
     state.apply_receiver_snapshot(receiver.lock().expect("receiver runtime mutex").snapshot());
     state.apply_streaming_snapshot(sender.lock().expect("sender session mutex").snapshot());
@@ -308,6 +370,8 @@ pub fn build_main_window(app: &adw::Application, launch: UiLaunchContext) {
     let controller = UiController {
         state: Rc::clone(&state),
         audio_backend: audio_backend.clone(),
+        discovery: Arc::clone(&discovery),
+        browser_join: Arc::clone(&browser_join),
         sender: Arc::clone(&sender),
         receiver: Arc::clone(&receiver),
         receiver_transport: Arc::clone(&receiver_transport),
@@ -315,13 +379,18 @@ pub fn build_main_window(app: &adw::Application, launch: UiLaunchContext) {
         widgets,
         context: UiContext {
             audio_backend_name: audio_backend.backend_name().to_string(),
-            discovery_service_type: discovery.service_type().to_string(),
+            discovery_service_type: discovery
+                .lock()
+                .expect("discovery mutex")
+                .service_type()
+                .to_string(),
             discovery_started,
         },
         paths: launch.paths.clone(),
         log_store: launch.log_store.clone(),
         diagnostics_runtime: launch.diagnostics_runtime.clone(),
         refresh_guards: UiRefreshGuards::default(),
+        render_cache: Rc::new(RefCell::new(UiRenderCache::default())),
     };
 
     refresh_ui(&controller);
@@ -337,13 +406,14 @@ pub fn build_main_window(app: &adw::Application, launch: UiLaunchContext) {
 
     tracing::info!(
         audio_backend = audio_backend.backend_name(),
-        discovery_service = discovery.service_type(),
+        discovery_service = %controller.context.discovery_service_type,
         receiver_state = ?receiver.lock().expect("receiver runtime mutex").state(),
         sender_state = ?sender.lock().expect("sender session mutex").snapshot().state,
         "SynchroSonic window activated"
     );
 
-    start_discovery_poll(discovery, controller.clone());
+    sync_local_receiver_advertisement(&controller);
+    start_discovery_poll(controller.clone());
     start_receiver_poll(controller.clone());
     start_streaming_poll(controller.clone());
     start_audio_inventory_poll(controller.clone());
@@ -778,6 +848,34 @@ fn connect_receiver_controls(controller: &UiController) {
         let stop_button = controller.widgets.receiver.stop_button.clone();
         stop_button.connect_clicked(move |_| stop_receiver_mode(&controller));
     }
+
+    {
+        let controller = controller.clone();
+        let generate_join_link_button = controller
+            .widgets
+            .receiver
+            .generate_join_link_button
+            .clone();
+        generate_join_link_button.connect_clicked(move |_| {
+            guarded_ui_callback(&controller, "generate-browser-join-link", || {
+                generate_browser_join_link(&controller, false);
+            });
+        });
+    }
+
+    {
+        let controller = controller.clone();
+        let open_join_prototype_button = controller
+            .widgets
+            .receiver
+            .open_join_prototype_button
+            .clone();
+        open_join_prototype_button.connect_clicked(move |_| {
+            guarded_ui_callback(&controller, "open-browser-join-prototype", || {
+                open_or_generate_browser_join_link(&controller);
+            });
+        });
+    }
 }
 
 fn connect_settings_controls(controller: &UiController) {
@@ -1133,8 +1231,101 @@ fn copy_text_to_clipboard(text: &str) -> Result<(), String> {
 
 fn open_path_in_default_app(path: &std::path::Path) -> Result<(), String> {
     let uri = gtk::gio::File::for_path(path).uri();
-    gtk::gio::AppInfo::launch_default_for_uri(&uri, None::<&gtk::gio::AppLaunchContext>)
+    open_uri_in_default_app(&uri)
+}
+
+fn open_uri_in_default_app(uri: &str) -> Result<(), String> {
+    gtk::gio::AppInfo::launch_default_for_uri(uri, None::<&gtk::gio::AppLaunchContext>)
         .map_err(|error| error.to_string())
+}
+
+fn browser_join_host_hint(controller: &UiController) -> Option<std::net::IpAddr> {
+    controller
+        .discovery
+        .lock()
+        .ok()
+        .and_then(|discovery| discovery.local_status().advertised_endpoint)
+        .map(|endpoint| endpoint.address.ip())
+}
+
+fn sync_browser_join_diagnostics(controller: &UiController) -> BrowserJoinSnapshot {
+    let snapshot = controller
+        .browser_join
+        .lock()
+        .expect("browser join mutex")
+        .snapshot();
+    controller.diagnostics_runtime.update_browser_join_snapshot(
+        snapshot.active,
+        snapshot.join_url.clone(),
+        snapshot.requests_served,
+        snapshot.last_error.clone(),
+    );
+    snapshot
+}
+
+fn generate_browser_join_link(controller: &UiController, open_after_generation: bool) {
+    let host_hint = browser_join_host_hint(controller);
+    let result = controller
+        .browser_join
+        .lock()
+        .expect("browser join mutex")
+        .generate_join_link(host_hint);
+    sync_browser_join_diagnostics(controller);
+
+    let message = match result {
+        Ok(link) => {
+            let clipboard_message = copy_text_to_clipboard(&link.url)
+                .map(|_| " The link was copied to the clipboard.".to_string())
+                .unwrap_or_default();
+            if open_after_generation {
+                if let Err(error) = open_uri_in_default_app(&link.url) {
+                    controller.state.borrow_mut().diagnostics.push(DiagnosticEvent::warning(
+                        "browser-join",
+                        format!("Generated the browser join prototype link, but opening it failed: {error}"),
+                    ));
+                }
+            }
+            DiagnosticEvent::info(
+                "browser-join",
+                format!(
+                    "Generated a browser join prototype link valid until {}.{}",
+                    format_unix_ms(link.expires_at_unix_ms),
+                    clipboard_message
+                ),
+            )
+        }
+        Err(error) => DiagnosticEvent::warning(
+            "browser-join",
+            format!("Failed to generate the browser join prototype link: {error}"),
+        ),
+    };
+    controller.state.borrow_mut().diagnostics.push(message);
+    refresh_ui(controller);
+}
+
+fn open_or_generate_browser_join_link(controller: &UiController) {
+    let current_url = controller
+        .browser_join
+        .lock()
+        .expect("browser join mutex")
+        .current_join_url();
+    match current_url {
+        Some(url) => {
+            let message = match open_uri_in_default_app(&url) {
+                Ok(()) => DiagnosticEvent::info(
+                    "browser-join",
+                    "Opened the current browser join prototype link.",
+                ),
+                Err(error) => DiagnosticEvent::warning(
+                    "browser-join",
+                    format!("Opening the browser join prototype link failed: {error}"),
+                ),
+            };
+            controller.state.borrow_mut().diagnostics.push(message);
+            refresh_ui(controller);
+        }
+        None => generate_browser_join_link(controller, true),
+    }
 }
 
 fn guarded_ui_callback<F>(controller: &UiController, callback_name: &'static str, callback: F)
@@ -1192,15 +1383,35 @@ fn refresh_ui(controller: &UiController) {
             .extend(pending_events);
     }
     let state = controller.state.borrow().clone();
+    let recent_logs = controller.log_store.snapshot_recent(60);
     let current_view_name = controller
         .navigation
         .visible_child_name()
         .map(|name| name.to_string())
         .unwrap_or_else(|| "dashboard".to_string());
+    let browser_join_snapshot = sync_browser_join_diagnostics(controller);
+
+    {
+        let cache = controller.render_cache.borrow();
+        let duplicate_refresh = cache.last_state.as_ref() == Some(&state)
+            && cache.last_logs == recent_logs
+            && cache.last_view_name.as_deref() == Some(current_view_name.as_str())
+            && cache.last_browser_join_snapshot.as_ref() == Some(&browser_join_snapshot);
+        if duplicate_refresh {
+            controller.diagnostics_runtime.note_ui_refresh(false);
+            tracing::trace!(
+                view = %current_view_name,
+                "skipped duplicate UI refresh because state, logs, and view are unchanged"
+            );
+            return;
+        }
+    }
+
+    controller.diagnostics_runtime.note_ui_refresh(true);
     controller.diagnostics_runtime.update_snapshot_from_state(
         &state,
         &RuntimeStateView {
-            current_view_name,
+            current_view_name: current_view_name.clone(),
             discovery_started: controller.context.discovery_started,
         },
     );
@@ -1209,8 +1420,155 @@ fn refresh_ui(controller: &UiController) {
     refresh_casting_page(controller, &state);
     refresh_audio_page(controller, &state);
     refresh_receiver_page(controller, &state);
-    refresh_diagnostics_page(controller, &state);
+    refresh_diagnostics_page(controller, &state, &recent_logs);
     refresh_settings_page(controller, &state);
+    let mut cache = controller.render_cache.borrow_mut();
+    cache.last_state = Some(state);
+    cache.last_logs = recent_logs;
+    cache.last_view_name = Some(current_view_name);
+    cache.last_browser_join_snapshot = Some(browser_join_snapshot);
+}
+
+fn discovery_row_models(state: &AppState) -> Vec<DiscoveryRowModel> {
+    state
+        .discovered_devices
+        .iter()
+        .map(|device| DiscoveryRowModel {
+            device_id: device.id.clone(),
+            title: device.display_name.clone(),
+            subtitle: format_device_row_subtitle(state, device),
+            icon_name: status_icon_name(device.status),
+            button_label: device.is_receiver_connectable().then(|| {
+                if state.streaming.target(&device.id).is_some() {
+                    "Queued".to_string()
+                } else {
+                    "Add to Cast".to_string()
+                }
+            }),
+            button_sensitive: device.is_receiver_connectable()
+                && state.streaming.target(&device.id).is_none(),
+        })
+        .collect()
+}
+
+fn casting_target_row_models(state: &AppState) -> Vec<CastingTargetRowModel> {
+    state
+        .streaming
+        .targets
+        .iter()
+        .map(|target| CastingTargetRowModel {
+            device_id: target.receiver_id.clone(),
+            title: target.receiver_name.clone(),
+            subtitle: format_target_row_subtitle(target),
+        })
+        .collect()
+}
+
+fn audio_source_row_models(state: &AppState) -> Vec<InventoryRowModel> {
+    state
+        .audio_sources
+        .iter()
+        .map(|source| InventoryRowModel {
+            title: source.display_name.clone(),
+            subtitle: format_audio_source_row_subtitle(state, source),
+            icon_name: audio_source_icon_name(source.kind),
+        })
+        .collect()
+}
+
+fn playback_target_row_models(state: &AppState) -> Vec<InventoryRowModel> {
+    state
+        .playback_targets
+        .iter()
+        .map(|target| InventoryRowModel {
+            title: target.display_name.clone(),
+            subtitle: format_playback_target_inventory_subtitle(state, target),
+            icon_name: playback_target_icon_name(target),
+        })
+        .collect()
+}
+
+fn diagnostic_row_models(state: &AppState) -> Vec<SimpleRowModel> {
+    state
+        .diagnostics
+        .iter()
+        .rev()
+        .take(60)
+        .map(|event| SimpleRowModel {
+            title: format!(
+                "{} · {}",
+                diagnostic_level_label(event.level),
+                event.component
+            ),
+            subtitle: format!(
+                "{} · {}",
+                format_unix_ms(event.timestamp_unix_ms),
+                event.message
+            ),
+            icon_name: diagnostic_icon_name(event.level),
+        })
+        .collect()
+}
+
+fn log_row_models(entries: &[StructuredLogEntry]) -> Vec<SimpleRowModel> {
+    entries
+        .iter()
+        .map(|entry| SimpleRowModel {
+            title: format!("{} · {}", entry.level, entry.target),
+            subtitle: format_log_entry_subtitle(entry),
+            icon_name: log_icon_name(entry.level.as_str()),
+        })
+        .collect()
+}
+
+fn note_list_render(
+    controller: &UiController,
+    list_name: &'static str,
+    rebuilt: bool,
+    row_count: usize,
+) {
+    controller
+        .diagnostics_runtime
+        .note_ui_list_render(rebuilt, row_count);
+    if rebuilt {
+        tracing::debug!(
+            list = list_name,
+            rebuilt,
+            row_count,
+            "processed UI list render"
+        );
+    } else {
+        tracing::trace!(
+            list = list_name,
+            rebuilt,
+            row_count,
+            "skipped redundant UI list rebuild"
+        );
+    }
+}
+
+fn render_inventory_rows(list_box: &gtk::ListBox, rows: &[InventoryRowModel]) {
+    clear_list_box(list_box);
+    for row_model in rows {
+        let row = adw::ActionRow::new();
+        row.set_title(&row_model.title);
+        row.set_subtitle(&row_model.subtitle);
+        let icon = gtk::Image::from_icon_name(row_model.icon_name);
+        row.add_prefix(&icon);
+        list_box.append(&row);
+    }
+}
+
+fn render_simple_rows(list_box: &gtk::ListBox, rows: &[SimpleRowModel]) {
+    clear_list_box(list_box);
+    for row_model in rows {
+        let row = adw::ActionRow::new();
+        row.set_title(&row_model.title);
+        row.set_subtitle(&row_model.subtitle);
+        let icon = gtk::Image::from_icon_name(row_model.icon_name);
+        row.add_prefix(&icon);
+        list_box.append(&row);
+    }
 }
 
 fn refresh_dashboard(controller: &UiController, state: &AppState) {
@@ -1295,7 +1653,6 @@ fn refresh_discovery_page(controller: &UiController, state: &AppState) {
         .summary_row
         .set_subtitle(&summary);
 
-    clear_list_box(&controller.widgets.discovery.device_list);
     let has_devices = !state.discovered_devices.is_empty();
     controller
         .widgets
@@ -1308,37 +1665,62 @@ fn refresh_discovery_page(controller: &UiController, state: &AppState) {
         .device_list
         .set_visible(has_devices);
     if !has_devices {
+        clear_list_box(&controller.widgets.discovery.device_list);
+        controller.render_cache.borrow_mut().discovery_rows.clear();
+        note_list_render(controller, "discovery-device-list", true, 0);
         return;
     }
 
-    for device in &state.discovered_devices {
-        let row = adw::ActionRow::new();
-        row.set_title(&device.display_name);
-        row.set_subtitle(&format_device_row_subtitle(state, device));
+    let rows = discovery_row_models(state);
+    let mut cache = controller.render_cache.borrow_mut();
+    if cache.discovery_rows != rows {
+        clear_list_box(&controller.widgets.discovery.device_list);
+        for row_model in &rows {
+            let row = adw::ActionRow::new();
+            row.set_title(&row_model.title);
+            row.set_subtitle(&row_model.subtitle);
 
-        let status_icon = gtk::Image::from_icon_name(status_icon_name(device.status));
-        row.add_prefix(&status_icon);
+            let status_icon = gtk::Image::from_icon_name(row_model.icon_name);
+            row.add_prefix(&status_icon);
 
-        if device.capabilities.supports_receiver && device.endpoint.is_some() {
-            let button = gtk::Button::with_label(if state.streaming.target(&device.id).is_some() {
-                "Queued"
-            } else {
-                "Add to Cast"
-            });
-            let can_queue = state.streaming.target(&device.id).is_none();
-            button.set_sensitive(can_queue);
-            if can_queue {
-                button.add_css_class("suggested-action");
-                let controller = controller.clone();
-                let device = device.clone();
-                button.connect_clicked(move |_| {
-                    queue_receiver_device_for_cast(&controller, device.clone())
-                });
+            if let Some(button_label) = &row_model.button_label {
+                let button = gtk::Button::with_label(button_label);
+                button.set_sensitive(row_model.button_sensitive);
+                if row_model.button_sensitive {
+                    button.add_css_class("suggested-action");
+                    let controller = controller.clone();
+                    let device = state
+                        .discovered_devices
+                        .iter()
+                        .find(|device| device.id == row_model.device_id)
+                        .cloned();
+                    button.connect_clicked(move |_| {
+                        if let Some(device) = &device {
+                            queue_receiver_device_for_cast(&controller, device.clone());
+                        }
+                    });
+                }
+                row.add_suffix(&button);
             }
-            row.add_suffix(&button);
-        }
 
-        controller.widgets.discovery.device_list.append(&row);
+            controller.widgets.discovery.device_list.append(&row);
+        }
+        cache.discovery_rows = rows;
+        drop(cache);
+        note_list_render(
+            controller,
+            "discovery-device-list",
+            true,
+            state.discovered_devices.len(),
+        );
+    } else {
+        drop(cache);
+        note_list_render(
+            controller,
+            "discovery-device-list",
+            false,
+            state.discovered_devices.len(),
+        );
     }
 }
 
@@ -1394,7 +1776,6 @@ fn refresh_casting_page(controller: &UiController, state: &AppState) {
         .stop_all_button
         .set_sensitive(state.streaming.active_target_count() > 0);
 
-    clear_list_box(&controller.widgets.casting.target_list);
     let has_targets = !state.streaming.targets.is_empty();
     controller
         .widgets
@@ -1406,19 +1787,47 @@ fn refresh_casting_page(controller: &UiController, state: &AppState) {
         .casting
         .target_list
         .set_visible(has_targets);
-    for target in &state.streaming.targets {
-        let row = adw::ActionRow::new();
-        row.set_title(&target.receiver_name);
-        row.set_subtitle(&format_target_row_subtitle(target));
+    if !has_targets {
+        clear_list_box(&controller.widgets.casting.target_list);
+        controller.render_cache.borrow_mut().casting_rows.clear();
+        note_list_render(controller, "casting-target-list", true, 0);
+    } else {
+        let rows = casting_target_row_models(state);
+        let mut cache = controller.render_cache.borrow_mut();
+        if cache.casting_rows != rows {
+            clear_list_box(&controller.widgets.casting.target_list);
+            for row_model in &rows {
+                let row = adw::ActionRow::new();
+                row.set_title(&row_model.title);
+                row.set_subtitle(&row_model.subtitle);
 
-        let remove_button = gtk::Button::with_label("Remove");
-        let controller_for_button = controller.clone();
-        let device_id = target.receiver_id.clone();
-        remove_button
-            .connect_clicked(move |_| remove_target_from_cast(&controller_for_button, &device_id));
-        row.add_suffix(&remove_button);
+                let remove_button = gtk::Button::with_label("Remove");
+                let controller_for_button = controller.clone();
+                let device_id = row_model.device_id.clone();
+                remove_button.connect_clicked(move |_| {
+                    remove_target_from_cast(&controller_for_button, &device_id)
+                });
+                row.add_suffix(&remove_button);
 
-        controller.widgets.casting.target_list.append(&row);
+                controller.widgets.casting.target_list.append(&row);
+            }
+            cache.casting_rows = rows;
+            drop(cache);
+            note_list_render(
+                controller,
+                "casting-target-list",
+                true,
+                state.streaming.targets.len(),
+            );
+        } else {
+            drop(cache);
+            note_list_render(
+                controller,
+                "casting-target-list",
+                false,
+                state.streaming.targets.len(),
+            );
+        }
     }
 
     controller
@@ -1452,7 +1861,6 @@ fn refresh_audio_page(controller: &UiController, state: &AppState) {
         format_selected_playback_target(state, state.config.receiver.playback_target_id.as_deref())
     ));
 
-    clear_list_box(&controller.widgets.audio.source_list);
     let has_sources = !state.audio_sources.is_empty();
     controller
         .widgets
@@ -1464,16 +1872,38 @@ fn refresh_audio_page(controller: &UiController, state: &AppState) {
         .audio
         .source_list
         .set_visible(has_sources);
-    for source in &state.audio_sources {
-        let row = adw::ActionRow::new();
-        row.set_title(&source.display_name);
-        row.set_subtitle(&format_audio_source_row_subtitle(state, source));
-        let icon = gtk::Image::from_icon_name(audio_source_icon_name(source.kind));
-        row.add_prefix(&icon);
-        controller.widgets.audio.source_list.append(&row);
+    if !has_sources {
+        clear_list_box(&controller.widgets.audio.source_list);
+        controller
+            .render_cache
+            .borrow_mut()
+            .audio_source_rows
+            .clear();
+        note_list_render(controller, "audio-source-list", true, 0);
+    } else {
+        let source_rows = audio_source_row_models(state);
+        let mut cache = controller.render_cache.borrow_mut();
+        if cache.audio_source_rows != source_rows {
+            render_inventory_rows(&controller.widgets.audio.source_list, &source_rows);
+            cache.audio_source_rows = source_rows;
+            drop(cache);
+            note_list_render(
+                controller,
+                "audio-source-list",
+                true,
+                state.audio_sources.len(),
+            );
+        } else {
+            drop(cache);
+            note_list_render(
+                controller,
+                "audio-source-list",
+                false,
+                state.audio_sources.len(),
+            );
+        }
     }
 
-    clear_list_box(&controller.widgets.audio.output_list);
     let has_outputs = !state.playback_targets.is_empty();
     controller
         .widgets
@@ -1485,17 +1915,46 @@ fn refresh_audio_page(controller: &UiController, state: &AppState) {
         .audio
         .output_list
         .set_visible(has_outputs);
-    for target in &state.playback_targets {
-        let row = adw::ActionRow::new();
-        row.set_title(&target.display_name);
-        row.set_subtitle(&format_playback_target_inventory_subtitle(state, target));
-        let icon = gtk::Image::from_icon_name(playback_target_icon_name(target));
-        row.add_prefix(&icon);
-        controller.widgets.audio.output_list.append(&row);
+    if !has_outputs {
+        clear_list_box(&controller.widgets.audio.output_list);
+        controller
+            .render_cache
+            .borrow_mut()
+            .audio_output_rows
+            .clear();
+        note_list_render(controller, "audio-output-list", true, 0);
+    } else {
+        let output_rows = playback_target_row_models(state);
+        let mut cache = controller.render_cache.borrow_mut();
+        if cache.audio_output_rows != output_rows {
+            render_inventory_rows(&controller.widgets.audio.output_list, &output_rows);
+            cache.audio_output_rows = output_rows;
+            drop(cache);
+            note_list_render(
+                controller,
+                "audio-output-list",
+                true,
+                state.playback_targets.len(),
+            );
+        } else {
+            drop(cache);
+            note_list_render(
+                controller,
+                "audio-output-list",
+                false,
+                state.playback_targets.len(),
+            );
+        }
     }
 }
 
 fn refresh_receiver_page(controller: &UiController, state: &AppState) {
+    let diagnostics_snapshot = controller.diagnostics_runtime.snapshot();
+    let browser_join_snapshot = controller
+        .browser_join
+        .lock()
+        .expect("browser join mutex")
+        .snapshot();
     refresh_playback_target_selector(
         &controller.widgets.receiver.output_selector,
         state,
@@ -1523,14 +1982,72 @@ fn refresh_receiver_page(controller: &UiController, state: &AppState) {
         .receiver
         .stop_button
         .set_sensitive(receiver_active);
+    controller
+        .widgets
+        .receiver
+        .open_join_prototype_button
+        .set_sensitive(browser_join_snapshot.join_url.is_some());
+
+    controller
+        .widgets
+        .receiver
+        .join_summary_row
+        .set_subtitle(&format!(
+            "{}. Requests served: {}. {}",
+            browser_join_snapshot
+                .join_url
+                .as_deref()
+                .unwrap_or("No browser join link generated yet"),
+            browser_join_snapshot.requests_served,
+            browser_join_snapshot
+                .token_expires_at_unix_ms
+                .map(|expires_at| format!("Expires {}", format_relative_age(expires_at)))
+                .unwrap_or_else(|| "Generate a link to start the host-side prototype.".to_string())
+        ));
 
     controller.widgets.receiver.state_row.set_subtitle(&format!(
-        "{:?} on {}:{} with {} latency.",
+        "{:?} on {}:{} with {} latency. Listener {}.",
         state.receiver.state,
         state.receiver.bind_host,
         state.receiver.listen_port,
-        format_latency_preset(state.receiver.latency_preset)
+        format_latency_preset(state.receiver.latency_preset),
+        diagnostics_snapshot
+            .receiver
+            .listener_bind_addr
+            .as_deref()
+            .unwrap_or("not bound")
     ));
+    controller
+        .widgets
+        .receiver
+        .advertisement_row
+        .set_subtitle(&format!(
+            "{} on {}, last renewal {}, error {}.",
+            if diagnostics_snapshot
+                .discovery
+                .advertisement_state
+                .is_empty()
+            {
+                "unknown".to_string()
+            } else {
+                diagnostics_snapshot.discovery.advertisement_state.clone()
+            },
+            diagnostics_snapshot
+                .discovery
+                .advertised_endpoint
+                .as_deref()
+                .unwrap_or("not advertised"),
+            diagnostics_snapshot
+                .discovery
+                .last_advertised_unix_ms
+                .map(format_relative_age)
+                .unwrap_or_else(|| "never".to_string()),
+            diagnostics_snapshot
+                .discovery
+                .last_advertisement_error
+                .as_deref()
+                .unwrap_or("none")
+        ));
     controller.widgets.receiver.connection_row.set_subtitle(
         &state
             .receiver
@@ -1563,10 +2080,14 @@ fn refresh_receiver_page(controller: &UiController, state: &AppState) {
         .widgets
         .receiver
         .detail_label
-        .set_text(&format_receiver_status(state));
+        .set_text(&format_receiver_status(state, &diagnostics_snapshot));
 }
 
-fn refresh_diagnostics_page(controller: &UiController, state: &AppState) {
+fn refresh_diagnostics_page(
+    controller: &UiController,
+    state: &AppState,
+    recent_logs: &[StructuredLogEntry],
+) {
     let info_count = state
         .diagnostics
         .iter()
@@ -1590,7 +2111,6 @@ fn refresh_diagnostics_page(controller: &UiController, state: &AppState) {
             "{} info, {} warning, {} error event(s). Newest events appear first.",
             info_count, warning_count, error_count
         ));
-    let recent_logs = controller.log_store.snapshot_recent(60);
     controller
         .widgets
         .diagnostics
@@ -1602,7 +2122,6 @@ fn refresh_diagnostics_page(controller: &UiController, state: &AppState) {
             controller.paths.log_path.display()
         ));
 
-    clear_list_box(&controller.widgets.diagnostics.list_box);
     let has_events = !state.diagnostics.is_empty();
     controller
         .widgets
@@ -1614,28 +2133,38 @@ fn refresh_diagnostics_page(controller: &UiController, state: &AppState) {
         .diagnostics
         .list_box
         .set_visible(has_events);
-    if has_events {
-        for event in state.diagnostics.iter().rev().take(60) {
-            let row = adw::ActionRow::new();
-            row.set_title(&format!(
-                "{} · {}",
-                diagnostic_level_label(event.level),
-                event.component
-            ));
-            row.set_subtitle(&format!(
-                "{} · {}",
-                format_unix_ms(event.timestamp_unix_ms),
-                event.message
-            ));
-
-            let icon = gtk::Image::from_icon_name(diagnostic_icon_name(event.level));
-            row.add_prefix(&icon);
-
-            controller.widgets.diagnostics.list_box.append(&row);
+    if !has_events {
+        clear_list_box(&controller.widgets.diagnostics.list_box);
+        controller
+            .render_cache
+            .borrow_mut()
+            .diagnostics_rows
+            .clear();
+        note_list_render(controller, "diagnostics-events-list", true, 0);
+    } else {
+        let rows = diagnostic_row_models(state);
+        let mut cache = controller.render_cache.borrow_mut();
+        if cache.diagnostics_rows != rows {
+            render_simple_rows(&controller.widgets.diagnostics.list_box, &rows);
+            cache.diagnostics_rows = rows;
+            drop(cache);
+            note_list_render(
+                controller,
+                "diagnostics-events-list",
+                true,
+                state.diagnostics.len().min(60),
+            );
+        } else {
+            drop(cache);
+            note_list_render(
+                controller,
+                "diagnostics-events-list",
+                false,
+                state.diagnostics.len().min(60),
+            );
         }
     }
 
-    clear_list_box(&controller.widgets.diagnostics.log_list_box);
     let has_logs = !recent_logs.is_empty();
     controller
         .widgets
@@ -1647,14 +2176,21 @@ fn refresh_diagnostics_page(controller: &UiController, state: &AppState) {
         .diagnostics
         .log_list_box
         .set_visible(has_logs);
-    if has_logs {
-        for entry in recent_logs {
-            let row = adw::ActionRow::new();
-            row.set_title(&format!("{} · {}", entry.level, entry.target));
-            row.set_subtitle(&format_log_entry_subtitle(&entry));
-            let icon = gtk::Image::from_icon_name(log_icon_name(entry.level.as_str()));
-            row.add_prefix(&icon);
-            controller.widgets.diagnostics.log_list_box.append(&row);
+    if !has_logs {
+        clear_list_box(&controller.widgets.diagnostics.log_list_box);
+        controller.render_cache.borrow_mut().log_rows.clear();
+        note_list_render(controller, "diagnostics-log-list", true, 0);
+    } else {
+        let rows = log_row_models(recent_logs);
+        let mut cache = controller.render_cache.borrow_mut();
+        if cache.log_rows != rows {
+            render_simple_rows(&controller.widgets.diagnostics.log_list_box, &rows);
+            cache.log_rows = rows;
+            drop(cache);
+            note_list_render(controller, "diagnostics-log-list", true, recent_logs.len());
+        } else {
+            drop(cache);
+            note_list_render(controller, "diagnostics-log-list", false, recent_logs.len());
         }
     }
 }
@@ -1772,7 +2308,7 @@ fn queue_selected_receiver_for_cast(controller: &UiController) {
             let mut state = controller.state.borrow_mut();
             state.diagnostics.push(DiagnosticEvent::warning(
                 "streaming",
-                "The selected receiver is no longer available with a resolved transport endpoint.",
+                "The selected receiver is no longer in a reachable receiver-listening state.",
             ));
             drop(state);
             refresh_ui(controller);
@@ -1781,6 +2317,20 @@ fn queue_selected_receiver_for_cast(controller: &UiController) {
 }
 
 fn queue_receiver_device_for_cast(controller: &UiController, device: DiscoveredDevice) {
+    if !device.is_receiver_connectable() {
+        let mut state = controller.state.borrow_mut();
+        state.diagnostics.push(DiagnosticEvent::warning(
+            "streaming",
+            format!(
+                "Selected receiver {} is not connectable yet: status={:?}, availability={:?}.",
+                device.display_name, device.status, device.availability
+            ),
+        ));
+        drop(state);
+        refresh_ui(controller);
+        return;
+    }
+
     let Some(endpoint) = device.endpoint.clone() else {
         let mut state = controller.state.borrow_mut();
         state.diagnostics.push(DiagnosticEvent::warning(
@@ -1941,6 +2491,7 @@ fn start_receiver_mode(controller: &UiController) {
                     format!("Receiver transport listener failed to start: {error}"),
                 ));
                 drop(state);
+                sync_local_receiver_advertisement(controller);
                 refresh_ui(controller);
                 return;
             }
@@ -1973,6 +2524,7 @@ fn start_receiver_mode(controller: &UiController) {
         }
     }
 
+    sync_local_receiver_advertisement(controller);
     refresh_ui(controller);
 }
 
@@ -2014,6 +2566,7 @@ fn stop_receiver_mode(controller: &UiController) {
         }
     }
 
+    sync_local_receiver_advertisement(controller);
     refresh_ui(controller);
 }
 
@@ -2401,14 +2954,46 @@ fn receiver_page() -> (gtk::ScrolledWindow, ReceiverWidgets) {
     buttons.append(&stop_button);
     content.append(&buttons);
 
+    let browser_join_group = preferences_group(
+        "Browser guest join prototype",
+        Some(
+            "Host-side session and link scaffolding for future no-install guests. This does not stream audio in the browser yet.",
+        ),
+    );
+    let join_summary_row = summary_row("Join link");
+    browser_join_group.add(&join_summary_row);
+    let join_buttons = gtk::Box::new(Orientation::Horizontal, 12);
+    let generate_join_link_button = gtk::Button::with_label("Generate join link");
+    generate_join_link_button.add_css_class("suggested-action");
+    let open_join_prototype_button = gtk::Button::with_label("Open browser join prototype");
+    join_buttons.append(&generate_join_link_button);
+    join_buttons.append(&open_join_prototype_button);
+    browser_join_group.add(&label_row(&{
+        let label = gtk::Label::new(Some(
+            "Prototype scope: tokenized local HTTP entry point and session diagnostics only.",
+        ));
+        label.set_wrap(true);
+        label.set_halign(Align::Start);
+        label.set_xalign(0.0);
+        label
+    }));
+    browser_join_group.add(&control_row(
+        "Prototype actions",
+        "Generate or open the current prototype link.",
+        &join_buttons,
+    ));
+    content.append(&browser_join_group);
+
     let summary_group = preferences_group(
         "Receiver health",
         Some("State, connection, and sync information that stays readable at a glance."),
     );
     let state_row = summary_row("Receiver state");
+    let advertisement_row = summary_row("Discovery advertisement");
     let connection_row = summary_row("Connection");
     let sync_row = summary_row("Sync");
     summary_group.add(&state_row);
+    summary_group.add(&advertisement_row);
     summary_group.add(&connection_row);
     summary_group.add(&sync_row);
     content.append(&summary_group);
@@ -2428,7 +3013,11 @@ fn receiver_page() -> (gtk::ScrolledWindow, ReceiverWidgets) {
             output_selector,
             start_button,
             stop_button,
+            join_summary_row,
+            generate_join_link_button,
+            open_join_prototype_button,
             state_row,
+            advertisement_row,
             connection_row,
             sync_row,
             detail_label,
@@ -2742,7 +3331,114 @@ fn empty_state(title: &str, description: &str, icon_name: &str) -> adw::StatusPa
     page
 }
 
-fn start_discovery_poll(mut discovery: MdnsDiscoveryService, controller: UiController) {
+fn update_discovery_local_diagnostics(
+    controller: &UiController,
+    local_status: &synchrosonic_discovery::LocalDiscoveryStatus,
+) {
+    controller
+        .diagnostics_runtime
+        .update_discovery_local_snapshot(
+            if controller.context.discovery_started {
+                "running".to_string()
+            } else {
+                "failed".to_string()
+            },
+            Some(local_status.device_id.to_string()),
+            format!("{:?}", local_status.receiver_status),
+            local_status
+                .advertised_endpoint
+                .as_ref()
+                .map(|endpoint| endpoint.address.to_string()),
+            local_status.last_advertised_unix_ms,
+            local_status.last_error.clone(),
+        );
+}
+
+fn sync_local_receiver_advertisement(controller: &UiController) {
+    let receiver_snapshot = controller
+        .receiver
+        .lock()
+        .expect("receiver runtime mutex")
+        .snapshot();
+    let transport_snapshot = controller
+        .receiver_transport
+        .lock()
+        .expect("receiver transport mutex")
+        .snapshot();
+    let last_error = transport_snapshot
+        .last_error
+        .clone()
+        .or_else(|| receiver_snapshot.last_error.clone());
+
+    let local_status = {
+        let mut discovery = controller.discovery.lock().expect("discovery mutex");
+        if let Err(error) = discovery.sync_receiver_advertisement(
+            receiver_snapshot.state != synchrosonic_core::ReceiverServiceState::Idle,
+            transport_snapshot.active,
+            transport_snapshot
+                .active
+                .then_some(transport_snapshot.bind_addr),
+            receiver_snapshot.connection.is_some() || transport_snapshot.connected_peer.is_some(),
+            last_error,
+        ) {
+            tracing::warn!(
+                error = %error,
+                "failed to synchronize local receiver discovery advertisement"
+            );
+        }
+        discovery.local_status()
+    };
+
+    update_discovery_local_diagnostics(controller, &local_status);
+}
+
+fn stop_unusable_sender_targets(controller: &UiController) {
+    let targets_to_remove = {
+        let state = controller.state.borrow();
+        state
+            .streaming
+            .targets
+            .iter()
+            .filter_map(|target| {
+                if target.state == synchrosonic_core::StreamSessionState::Streaming {
+                    return None;
+                }
+                let connectable = state
+                    .discovered_devices
+                    .iter()
+                    .find(|device| device.id == target.receiver_id)
+                    .map(|device| device.is_receiver_connectable())
+                    .unwrap_or(false);
+                (!connectable).then(|| (target.receiver_id.clone(), target.receiver_name.clone()))
+            })
+            .collect::<Vec<_>>()
+    };
+
+    if targets_to_remove.is_empty() {
+        return;
+    }
+
+    let sender = controller.sender.lock().expect("sender session mutex");
+    for (device_id, _) in &targets_to_remove {
+        let _ = sender.stop_target(device_id);
+    }
+    let snapshot = sender.snapshot();
+    drop(sender);
+
+    let mut state = controller.state.borrow_mut();
+    state.apply_streaming_snapshot(snapshot);
+    for (device_id, receiver_name) in targets_to_remove {
+        state.diagnostics.push(DiagnosticEvent::warning(
+            "streaming",
+            format!(
+                "Stopped pending connection attempts for {} ({}) because the device is no longer reachable.",
+                receiver_name, device_id
+            ),
+        ));
+    }
+}
+
+fn start_discovery_poll(controller: UiController) {
     glib::timeout_add_seconds_local(DISCOVERY_POLL_INTERVAL_SECS as u32, move || {
         guarded_timeout_callback(&controller, "discovery-poll", || {
             let started = Instant::now();
@@ -2758,56 +3454,64 @@ fn start_discovery_poll(mut discovery: MdnsDiscoveryService, controller: UiContr
             let mut should_refresh = false;
             let mut changes_applied = 0_usize;
             let mut poll_error = None::<String>;
-
-            loop {
-                match discovery.poll_event() {
-                    Ok(Some(event)) => {
-                        controller.state.borrow_mut().apply_discovery_event(event);
-                        changes_applied += 1;
-                        should_refresh = true;
-                    }
-                    Ok(None) => break,
-                    Err(error) => {
-                        poll_error = Some(error.to_string());
-                        controller
-                            .state
-                            .borrow_mut()
-                            .diagnostics
-                            .push(DiagnosticEvent::warning(
-                                "discovery",
-                                format!("mDNS discovery event error: {error}"),
-                            ));
-                        should_refresh = true;
-                        changes_applied += 1;
-                        break;
+            let (events, stale_events, snapshot, local_status) = {
+                let mut discovery = controller.discovery.lock().expect("discovery mutex");
+                let mut events = Vec::new();
+                loop {
+                    match discovery.poll_event() {
+                        Ok(Some(event)) => events.push(event),
+                        Ok(None) => break,
+                        Err(error) => {
+                            poll_error = Some(error.to_string());
+                            controller.state.borrow_mut().diagnostics.push(
+                                DiagnosticEvent::warning(
+                                    "discovery",
+                                    format!("mDNS discovery event error: {error}"),
+                                ),
+                            );
+                            should_refresh = true;
+                            changes_applied += 1;
+                            break;
+                        }
                     }
                 }
+
+                let stale_events =
+                    match discovery.prune_stale() {
+                        Ok(events) => events,
+                        Err(error) => {
+                            poll_error = Some(error.to_string());
+                            controller.state.borrow_mut().diagnostics.push(
+                                DiagnosticEvent::warning(
+                                    "discovery",
+                                    format!("mDNS stale pruning failed: {error}"),
+                                ),
+                            );
+                            should_refresh = true;
+                            changes_applied += 1;
+                            Vec::new()
+                        }
+                    };
+                (
+                    events,
+                    stale_events,
+                    discovery.snapshot(),
+                    discovery.local_status(),
+                )
+            };
+            update_discovery_local_diagnostics(&controller, &local_status);
+
+            for event in events {
+                controller.state.borrow_mut().apply_discovery_event(event);
+                changes_applied += 1;
+                should_refresh = true;
             }
-
-            match discovery.prune_stale() {
-                Ok(events) => {
-                    changes_applied += events.len();
-                    for event in events {
-                        controller.state.borrow_mut().apply_discovery_event(event);
-                    }
-                    should_refresh |= changes_applied > 0;
-                }
-                Err(error) => {
-                    poll_error = Some(error.to_string());
-                    controller
-                        .state
-                        .borrow_mut()
-                        .diagnostics
-                        .push(DiagnosticEvent::warning(
-                            "discovery",
-                            format!("mDNS stale pruning failed: {error}"),
-                        ));
-                    should_refresh = true;
-                    changes_applied += 1;
-                }
+            changes_applied += stale_events.len();
+            for event in stale_events {
+                controller.state.borrow_mut().apply_discovery_event(event);
             }
+            should_refresh |= changes_applied > 0;
 
-            let snapshot = discovery.snapshot();
             let current_discovered_devices = effective_discovered_devices(&snapshot.devices);
             if previous_discovered_devices != current_discovered_devices {
                 should_refresh = true;
@@ -2825,28 +3529,30 @@ fn start_discovery_poll(mut discovery: MdnsDiscoveryService, controller: UiContr
                 .clone();
             if previous_selected_receiver != current_selected_receiver {
                 let message = match (previous_selected_receiver, current_selected_receiver) {
-                (Some(previous), Some(current)) => Some(DiagnosticEvent::warning(
-                    "discovery",
-                    format!(
-                        "Selected receiver {} disappeared; switched selection to {}.",
-                        previous, current
-                    ),
-                )),
-                (Some(previous), None) => Some(DiagnosticEvent::warning(
-                    "discovery",
-                    format!(
-                        "Selected receiver {} disappeared and no replacement receiver is available.",
-                        previous
-                    ),
-                )),
-                _ => None,
-            };
+                    (Some(previous), Some(current)) => Some(DiagnosticEvent::warning(
+                        "discovery",
+                        format!(
+                            "Selected receiver {} disappeared; switched selection to {}.",
+                            previous, current
+                        ),
+                    )),
+                    (Some(previous), None) => Some(DiagnosticEvent::warning(
+                        "discovery",
+                        format!(
+                            "Selected receiver {} disappeared and no replacement receiver is available.",
+                            previous
+                        ),
+                    )),
+                    _ => None,
+                };
                 if let Some(message) = message {
                     controller.state.borrow_mut().diagnostics.push(message);
                     should_refresh = true;
                     changes_applied += 1;
                 }
             }
+
+            stop_unusable_sender_targets(&controller);
 
             let duration_ms = elapsed_ms(started);
             controller.diagnostics_runtime.note_poll(
@@ -2859,14 +3565,13 @@ fn start_discovery_poll(mut discovery: MdnsDiscoveryService, controller: UiContr
                     error: poll_error.clone(),
                 },
             );
-            tracing::debug!(
-                poll = "discovery",
-                interval_secs = DISCOVERY_POLL_INTERVAL_SECS,
+            log_poll_completion(
+                "discovery",
+                DISCOVERY_POLL_INTERVAL_SECS,
                 duration_ms,
-                skipped = false,
+                false,
                 changes_applied,
-                error = ?poll_error,
-                "completed discovery refresh"
+                poll_error.as_deref(),
             );
             if should_refresh {
                 refresh_ui(&controller);
@@ -2890,11 +3595,19 @@ fn start_receiver_poll(controller: UiController) {
                 .lock()
                 .expect("receiver transport mutex")
                 .snapshot();
-            let previous_transport_error = controller
-                .diagnostics_runtime
-                .snapshot()
+            let previous_diagnostics_snapshot = controller.diagnostics_runtime.snapshot();
+            let previous_transport_error = previous_diagnostics_snapshot
                 .receiver
-                .last_transport_error;
+                .last_transport_error
+                .clone();
+            let previous_advertisement_state = previous_diagnostics_snapshot
+                .discovery
+                .advertisement_state
+                .clone();
+            let previous_advertisement_error = previous_diagnostics_snapshot
+                .discovery
+                .last_advertisement_error
+                .clone();
             controller
                 .diagnostics_runtime
                 .update_receiver_listener_snapshot(
@@ -2902,6 +3615,8 @@ fn start_receiver_poll(controller: UiController) {
                     transport_snapshot.active,
                     transport_snapshot.last_error.clone(),
                 );
+            sync_local_receiver_advertisement(&controller);
+            let current_discovery_snapshot = controller.diagnostics_runtime.snapshot().discovery;
             let mut should_refresh = false;
             let mut changes_applied = 0_usize;
             let mut poll_error = None::<String>;
@@ -2979,6 +3694,29 @@ fn start_receiver_poll(controller: UiController) {
                     changes_applied += 1;
                     should_refresh = true;
                 }
+                if previous_advertisement_state != current_discovery_snapshot.advertisement_state {
+                    state.diagnostics.push(DiagnosticEvent::info(
+                        "receiver-discovery",
+                        format!(
+                            "Receiver discovery advertisement is now {}.",
+                            current_discovery_snapshot.advertisement_state
+                        ),
+                    ));
+                    changes_applied += 1;
+                    should_refresh = true;
+                }
+                if previous_advertisement_error
+                    != current_discovery_snapshot.last_advertisement_error
+                {
+                    if let Some(error) = &current_discovery_snapshot.last_advertisement_error {
+                        state.diagnostics.push(DiagnosticEvent::warning(
+                            "receiver-discovery",
+                            format!("Receiver discovery advertisement reported: {error}"),
+                        ));
+                        changes_applied += 1;
+                        should_refresh = true;
+                    }
+                }
                 if let Some(error) = &transport_snapshot.last_error {
                     poll_error = Some(error.clone());
                     if state.diagnostics.last().map(|event| event.message.as_str())
@@ -3021,14 +3759,13 @@ fn start_receiver_poll(controller: UiController) {
                     error: poll_error.clone(),
                 },
             );
-            tracing::debug!(
-                poll = "receiver",
-                interval_secs = RECEIVER_POLL_INTERVAL_SECS,
+            log_poll_completion(
+                "receiver",
+                RECEIVER_POLL_INTERVAL_SECS,
                 duration_ms,
-                skipped = false,
+                false,
                 changes_applied,
-                error = ?poll_error,
-                "completed receiver refresh"
+                poll_error.as_deref(),
             );
             if should_refresh {
                 refresh_ui(&controller);
@@ -3134,7 +3871,6 @@ fn start_streaming_poll(controller: UiController) {
             }
 
             let duration_ms = elapsed_ms(started);
-            let poll_error_for_log = poll_error.clone();
             controller.diagnostics_runtime.note_poll(
                 PollKind::Streaming,
                 PollObservation {
@@ -3142,17 +3878,16 @@ fn start_streaming_poll(controller: UiController) {
                     duration_ms,
                     skipped: false,
                     changes_applied,
-                    error: poll_error,
+                    error: poll_error.clone(),
                 },
             );
-            tracing::debug!(
-                poll = "streaming",
-                interval_secs = STREAMING_POLL_INTERVAL_SECS,
+            log_poll_completion(
+                "streaming",
+                STREAMING_POLL_INTERVAL_SECS,
                 duration_ms,
-                skipped = false,
+                false,
                 changes_applied,
-                error = ?poll_error_for_log,
-                "completed streaming refresh"
+                poll_error.as_deref(),
             );
             if should_refresh {
                 refresh_ui(&controller);
@@ -3189,6 +3924,12 @@ fn start_audio_inventory_poll(controller: UiController) {
     }
 
     let refresh_in_flight = Arc::new(AtomicBool::new(false));
+    refresh_in_flight.store(true, Ordering::SeqCst);
+    spawn_audio_inventory_refresh(
+        controller.audio_backend.clone(),
+        sender.clone(),
+        Arc::clone(&refresh_in_flight),
+    );
     glib::timeout_add_seconds_local(AUDIO_INVENTORY_POLL_INTERVAL_SECS as u32, move || {
         guarded_timeout_callback(&controller, "audio-inventory-poll", || {
             if refresh_in_flight.swap(true, Ordering::SeqCst) {
@@ -3223,36 +3964,32 @@ fn start_audio_inventory_poll(controller: UiController) {
                 return ControlFlow::Continue;
             }
 
-            let sender = sender.clone();
-            let refresh_in_flight = Arc::clone(&refresh_in_flight);
-            let audio_backend = controller.audio_backend.clone();
-            thread::spawn(move || {
-                let started = Instant::now();
-                let result = audio_backend.list_inventory();
-                let duration_ms = elapsed_ms(started);
-                let _ = sender.send(AudioInventoryRefreshResult {
-                    result,
-                    duration_ms,
-                });
-                refresh_in_flight.store(false, Ordering::SeqCst);
-            });
+            spawn_audio_inventory_refresh(
+                controller.audio_backend.clone(),
+                sender.clone(),
+                Arc::clone(&refresh_in_flight),
+            );
 
             ControlFlow::Continue
         })
     });
 }
 
-fn refresh_audio_inventory(audio_backend: &LinuxAudioBackend, state: &mut AppState) {
-    match audio_backend.list_inventory() {
-        Ok((sources, targets)) => {
-            state.set_audio_sources(sources);
-            state.set_playback_targets(targets);
-        }
-        Err(error) => state.diagnostics.push(DiagnosticEvent::warning(
-            "audio",
-            format!("PipeWire audio inventory enumeration failed: {error}"),
-        )),
-    }
+fn spawn_audio_inventory_refresh(
+    audio_backend: LinuxAudioBackend,
+    sender: mpsc::Sender<AudioInventoryRefreshResult>,
+    refresh_in_flight: Arc<AtomicBool>,
+) {
+    thread::spawn(move || {
+        let started = Instant::now();
+        let result = audio_backend.list_inventory();
+        let duration_ms = elapsed_ms(started);
+        let _ = sender.send(AudioInventoryRefreshResult {
+            result,
+            duration_ms,
+        });
+        refresh_in_flight.store(false, Ordering::SeqCst);
+    });
 }
 
 fn apply_audio_inventory_refresh_result(
@@ -3411,14 +4148,14 @@ fn apply_audio_inventory_refresh_result(
                     error: None,
                 },
             );
-            tracing::debug!(
-                poll = "audio-inventory",
-                interval_secs = AUDIO_INVENTORY_POLL_INTERVAL_SECS,
-                duration_ms = refresh_result.duration_ms,
-                skipped = false,
-                source_changes_applied,
-                playback_changes_applied,
-                "completed audio inventory refresh"
+            let changes_applied = source_changes_applied + playback_changes_applied;
+            log_poll_completion(
+                "audio-inventory",
+                AUDIO_INVENTORY_POLL_INTERVAL_SECS,
+                refresh_result.duration_ms,
+                false,
+                changes_applied,
+                None,
             );
         }
         Err(error) => {
@@ -3453,14 +4190,13 @@ fn apply_audio_inventory_refresh_result(
                     error: Some(message.clone()),
                 },
             );
-            tracing::debug!(
-                poll = "audio-inventory",
-                interval_secs = AUDIO_INVENTORY_POLL_INTERVAL_SECS,
-                duration_ms = refresh_result.duration_ms,
-                skipped = false,
-                changes_applied = 0_usize,
-                error = %message,
-                "audio inventory refresh failed"
+            log_poll_completion(
+                "audio-inventory",
+                AUDIO_INVENTORY_POLL_INTERVAL_SECS,
+                refresh_result.duration_ms,
+                false,
+                0,
+                Some(message.as_str()),
             );
         }
     }
@@ -3475,6 +4211,37 @@ fn apply_audio_inventory_refresh_result(
 
 fn elapsed_ms(started: Instant) -> u64 {
     started.elapsed().as_millis() as u64
+}
+
+fn log_poll_completion(
+    poll: &'static str,
+    interval_secs: u64,
+    duration_ms: u64,
+    skipped: bool,
+    changes_applied: usize,
+    error: Option<&str>,
+) {
+    let has_error = error.is_some();
+    if skipped || has_error || changes_applied > 0 {
+        tracing::debug!(
+            poll,
+            interval_secs,
+            duration_ms,
+            skipped,
+            changes_applied,
+            error,
+            "completed refresh"
+        );
+    } else {
+        tracing::trace!(
+            poll,
+            interval_secs,
+            duration_ms,
+            skipped,
+            changes_applied,
+            "completed refresh with no observable changes"
+        );
+    }
 }
 
 fn playback_target_transition_diagnostic(
@@ -3623,9 +4390,10 @@ fn format_device_row_subtitle(state: &AppState, device: &DiscoveredDevice) -> St
         ""
     };
     format!(
-        "Status: {:?}, availability: {:?}, endpoint: {}, receiver={}, local_output={}, bluetooth={}.{}{}",
+        "Status: {:?}, availability: {:?}, connectable={}, endpoint: {}, receiver={}, local_output={}, bluetooth={}.{}{}",
         device.status,
         device.availability,
+        device.is_receiver_connectable(),
         device
             .endpoint
             .as_ref()
@@ -3641,10 +4409,16 @@ fn format_device_row_subtitle(state: &AppState, device: &DiscoveredDevice) -> St
 
 fn format_target_row_subtitle(target: &StreamTargetSnapshot) -> String {
     format!(
-        "{:?} with {:?} health, endpoint {}, latency {:?} ms, buffer {}%, dropped {} packet(s).",
+        "{:?} with {:?} health, endpoint {}, attempt {}, retry {}, last failure {:?}, latency {:?} ms, buffer {}%, dropped {} packet(s).",
         target.state,
         target.health,
         target.endpoint,
+        target.attempt_count,
+        target
+            .next_retry_at_unix_ms
+            .map(format_relative_age)
+            .unwrap_or_else(|| "none".to_string()),
+        target.last_error_kind,
         target.metrics.latency_estimate_ms,
         target.network_buffer.fill_percent(),
         target.network_buffer.dropped_packets
@@ -3822,13 +4596,19 @@ fn format_stream_target_statuses(targets: &[StreamTargetSnapshot]) -> String {
         .iter()
         .map(|target| {
             format!(
-                "- {} [{}] {:?} {:?} endpoint={} session={} latency={:?}ms buffer={}% ({} / {} packets, dropped={}) bitrate={}bps bytes={} last_error={}",
+                "- {} [{}] {:?} {:?} endpoint={} session={} attempts={} retry={} last_failure={:?} latency={:?}ms buffer={}% ({} / {} packets, dropped={}) bitrate={}bps bytes={} last_error={}",
                 target.receiver_name,
                 target.receiver_id,
                 target.state,
                 target.health,
                 target.endpoint,
                 target.session_id.as_deref().unwrap_or("not negotiated"),
+                target.attempt_count,
+                target
+                    .next_retry_at_unix_ms
+                    .map(format_relative_age)
+                    .unwrap_or_else(|| "none".to_string()),
+                target.last_error_kind,
                 target.metrics.latency_estimate_ms,
                 target.network_buffer.fill_percent(),
                 target.network_buffer.queued_packets,
@@ -3964,11 +4744,7 @@ fn receiver_selector_options(state: &AppState) -> Vec<ReceiverSelectorOption> {
     state
         .discovered_devices
         .iter()
-        .filter(|device| {
-            device.capabilities.supports_receiver
-                && device.endpoint.is_some()
-                && device.availability != DeviceAvailability::Unavailable
-        })
+        .filter(|device| device.is_receiver_connectable())
         .map(|device| ReceiverSelectorOption {
             id: device.id.to_string(),
             label: format!(
@@ -4021,7 +4797,7 @@ fn find_receiver_device(state: &AppState, device_id: &str) -> Option<DiscoveredD
     state
         .discovered_devices
         .iter()
-        .find(|device| device.id.as_str() == device_id && device.capabilities.supports_receiver)
+        .find(|device| device.id.as_str() == device_id && device.is_receiver_connectable())
         .cloned()
 }
 
@@ -4034,7 +4810,37 @@ fn receiver_bind_addr(config: &AppConfig) -> SocketAddr {
     .unwrap_or_else(|_| SocketAddr::from(([0, 0, 0, 0], config.receiver.listen_port)))
 }
 
-fn format_receiver_status(state: &AppState) -> String {
+fn format_relative_age(timestamp_unix_ms: u64) -> String {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    if timestamp_unix_ms > now {
+        let remaining_ms = timestamp_unix_ms - now;
+        if remaining_ms < 1_000 {
+            "imminent".to_string()
+        } else if remaining_ms < 60_000 {
+            format!("in {}s", remaining_ms / 1_000)
+        } else if remaining_ms < 3_600_000 {
+            format!("in {}m", remaining_ms / 60_000)
+        } else {
+            format!("in {}h", remaining_ms / 3_600_000)
+        }
+    } else {
+        let elapsed_ms = now - timestamp_unix_ms;
+        if elapsed_ms < 1_000 {
+            "just now".to_string()
+        } else if elapsed_ms < 60_000 {
+            format!("{}s ago", elapsed_ms / 1_000)
+        } else if elapsed_ms < 3_600_000 {
+            format!("{}m ago", elapsed_ms / 60_000)
+        } else {
+            format!("{}h ago", elapsed_ms / 3_600_000)
+        }
+    }
+}
+
+fn format_receiver_status(state: &AppState, diagnostics_snapshot: &SubsystemSnapshot) -> String {
     let receiver = &state.receiver;
     let connection = receiver
         .connection
@@ -4058,11 +4864,37 @@ fn format_receiver_status(state: &AppState) -> String {
     let last_error = receiver.last_error.as_deref().unwrap_or("none");
 
     format!(
-        "State: {:?}\nAdvertised name: {}\nListen address: {}:{}\nLatency preset: {}\nPlayback backend: {}\nPlayback target: {} (available={})\nConnection: {}\nBuffer: {} packet(s), {} frame(s), {} ms queued, target {} ms, max {} ms, {}% full\nSync: state={:?} expected={} ms requested={} queued={} ms buffer delta={} ms schedule error={} ms late drops={} resets={} last sender ts={} last sender unix={}\nMetrics: packets in={} frames in={} bytes in={} packets out={} frames out={} bytes out={} underruns={} overruns={} reconnect attempts={}\nLast error: {}\nInternal app flow: use the Start/Stop buttons here; the TCP receiver listener already submits Connected, AudioPacket, KeepAlive, and Disconnected events into the runtime.",
+        "State: {:?}\nAdvertised name: {}\nConfigured listen address: {}:{}\nBound listener: {} (active={})\nDiscovery advertisement: state={} endpoint={} last renewal={} error={}\nLatency preset: {}\nPlayback backend: {}\nPlayback target: {} (available={})\nConnection: {}\nBuffer: {} packet(s), {} frame(s), {} ms queued, target {} ms, max {} ms, {}% full\nSync: state={:?} expected={} ms requested={} queued={} ms buffer delta={} ms schedule error={} ms late drops={} resets={} last sender ts={} last sender unix={}\nMetrics: packets in={} frames in={} bytes in={} packets out={} frames out={} bytes out={} underruns={} overruns={} reconnect attempts={}\nLast error: {}\nInternal app flow: use the Start/Stop buttons here; the TCP receiver listener binds first, then the discovery advertisement is refreshed with the real endpoint.",
         receiver.state,
         receiver.advertised_name,
         receiver.bind_host,
         receiver.listen_port,
+        diagnostics_snapshot
+            .receiver
+            .listener_bind_addr
+            .as_deref()
+            .unwrap_or("not bound"),
+        diagnostics_snapshot.receiver.listener_active,
+        if diagnostics_snapshot.discovery.advertisement_state.is_empty() {
+            "unknown".to_string()
+        } else {
+            diagnostics_snapshot.discovery.advertisement_state.clone()
+        },
+        diagnostics_snapshot
+            .discovery
+            .advertised_endpoint
+            .as_deref()
+            .unwrap_or("not advertised"),
+        diagnostics_snapshot
+            .discovery
+            .last_advertised_unix_ms
+            .map(format_relative_age)
+            .unwrap_or_else(|| "never".to_string()),
+        diagnostics_snapshot
+            .discovery
+            .last_advertisement_error
+            .as_deref()
+            .unwrap_or("none"),
         format_latency_preset(receiver.latency_preset),
         receiver
             .playback_backend
@@ -4209,9 +5041,16 @@ fn playback_target_icon_name(target: &PlaybackTarget) -> &'static str {
 fn status_icon_name(status: synchrosonic_core::DeviceStatus) -> &'static str {
     match status {
         synchrosonic_core::DeviceStatus::Discovered => "network-wireless-signal-excellent-symbolic",
+        synchrosonic_core::DeviceStatus::Resolving => "network-idle-symbolic",
+        synchrosonic_core::DeviceStatus::ReceiverStarting => "media-playback-start-symbolic",
+        synchrosonic_core::DeviceStatus::ReceiverListening => "network-workgroup-symbolic",
+        synchrosonic_core::DeviceStatus::Reachable => "network-wireless-signal-excellent-symbolic",
         synchrosonic_core::DeviceStatus::Connecting => "network-transmit-receive-symbolic",
         synchrosonic_core::DeviceStatus::Connected => "object-select-symbolic",
         synchrosonic_core::DeviceStatus::Unavailable => "dialog-warning-symbolic",
+        synchrosonic_core::DeviceStatus::Stale => "appointment-missed-symbolic",
+        synchrosonic_core::DeviceStatus::SelfDevice => "computer-symbolic",
+        synchrosonic_core::DeviceStatus::IncompatibleVersion => "dialog-error-symbolic",
     }
 }
 
@@ -4352,10 +5191,10 @@ mod tests {
             protocol_version: synchrosonic_core::DISCOVERY_PROTOCOL_VERSION,
             capabilities: DeviceCapabilities::receiver(),
             availability,
-            status: if availability == DeviceAvailability::Unavailable {
+            status: if availability == DeviceAvailability::Unavailable || endpoint.is_none() {
                 DeviceStatus::Unavailable
             } else {
-                DeviceStatus::Discovered
+                DeviceStatus::Reachable
             },
             endpoint: endpoint.map(|address| TransportEndpoint {
                 device_id: DeviceId::new(id),

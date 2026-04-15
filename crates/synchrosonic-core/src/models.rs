@@ -32,9 +32,16 @@ pub enum DeviceRole {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DeviceStatus {
     Discovered,
+    Resolving,
+    ReceiverStarting,
+    ReceiverListening,
+    Reachable,
     Connecting,
     Connected,
     Unavailable,
+    Stale,
+    SelfDevice,
+    IncompatibleVersion,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -151,6 +158,26 @@ pub struct DiscoveredDevice {
     pub endpoint: Option<TransportEndpoint>,
     pub service_fullname: String,
     pub last_seen_unix_ms: u64,
+}
+
+impl DiscoveredDevice {
+    pub fn is_self_device(&self) -> bool {
+        self.status == DeviceStatus::SelfDevice
+    }
+
+    pub fn is_protocol_compatible(&self) -> bool {
+        self.protocol_version == DISCOVERY_PROTOCOL_VERSION
+    }
+
+    pub fn is_receiver_connectable(&self) -> bool {
+        self.capabilities.supports_receiver
+            && self.availability == DeviceAvailability::Available
+            && self.endpoint.is_some()
+            && matches!(
+                self.status,
+                DeviceStatus::Reachable | DeviceStatus::Connecting | DeviceStatus::Connected
+            )
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -22,6 +22,8 @@ unless a page says otherwise.
 - [Linting And Checks](./linting-and-checks.md)
 - [Build And Release](./build-and-release.md)
 - [Diagnostics And Crash Reports](./diagnostics-and-crash-reports.md)
+- [Runtime Refresh Optimization](./runtime-refresh-optimization.md)
+- [Browser Join / Web Receiver Design](../browser-join-web-receiver.md)
 - [Troubleshooting](./troubleshooting.md)
 - [Contributing Workflow](./contributing-workflow.md)
 

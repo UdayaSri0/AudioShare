@@ -1,3 +1,4 @@
+mod browser_join;
 mod diagnostics;
 mod logging;
 mod metadata;

@@ -5,8 +5,8 @@ use crate::{
     config::AppConfig,
     diagnostics::DiagnosticEvent,
     models::{
-        AudioSource, AudioSourceKind, DeviceAvailability, DeviceId, DeviceStatus, DiscoveredDevice,
-        DiscoveryEvent, DiscoverySnapshot, PlaybackTarget, QualityPreset,
+        AudioSource, AudioSourceKind, DeviceId, DeviceStatus, DiscoveredDevice, DiscoveryEvent,
+        DiscoverySnapshot, PlaybackTarget, QualityPreset,
     },
     receiver::{ReceiverLatencyPreset, ReceiverServiceState, ReceiverSnapshot},
     streaming::{LocalMirrorState, StreamSessionSnapshot, StreamSessionState},
@@ -213,12 +213,10 @@ impl AppState {
     }
 
     pub fn select_receiver_device(&mut self, device_id: DeviceId) -> bool {
-        let is_valid = self.discovered_devices.iter().any(|device| {
-            device.id == device_id
-                && device.capabilities.supports_receiver
-                && device.endpoint.is_some()
-                && device.availability != DeviceAvailability::Unavailable
-        });
+        let is_valid = self
+            .discovered_devices
+            .iter()
+            .any(|device| device.id == device_id && device.is_receiver_connectable());
         if !is_valid {
             return false;
         }
@@ -289,12 +287,9 @@ impl AppState {
             .selected_receiver_device_id
             .as_ref()
             .map(|selected_id| {
-                self.discovered_devices.iter().any(|device| {
-                    &device.id == selected_id
-                        && device.capabilities.supports_receiver
-                        && device.endpoint.is_some()
-                        && device.availability != DeviceAvailability::Unavailable
-                })
+                self.discovered_devices
+                    .iter()
+                    .any(|device| &device.id == selected_id && device.is_receiver_connectable())
             })
             .unwrap_or(false);
 
@@ -305,11 +300,7 @@ impl AppState {
         self.selected_receiver_device_id = self
             .discovered_devices
             .iter()
-            .find(|device| {
-                device.capabilities.supports_receiver
-                    && device.endpoint.is_some()
-                    && device.availability != DeviceAvailability::Unavailable
-            })
+            .find(|device| device.is_receiver_connectable())
             .map(|device| device.id.clone());
     }
 }
@@ -416,7 +407,7 @@ mod tests {
             protocol_version: crate::models::DISCOVERY_PROTOCOL_VERSION,
             capabilities: crate::models::DeviceCapabilities::receiver(),
             availability: crate::models::DeviceAvailability::Available,
-            status: DeviceStatus::Discovered,
+            status: DeviceStatus::Reachable,
             endpoint: Some(crate::models::TransportEndpoint {
                 device_id: DeviceId::new("receiver-1"),
                 address: std::net::SocketAddr::from(([127, 0, 0, 1], 51_700)),
@@ -437,5 +428,55 @@ mod tests {
         assert!(state.discovered_devices.is_empty());
         assert!(state.devices.is_empty());
         assert!(state.selected_receiver_device_id.is_none());
+    }
+
+    #[test]
+    fn state_only_selects_reachable_receivers() {
+        let mut state = AppState::new(AppConfig::default());
+        state.apply_discovery_snapshot(DiscoverySnapshot {
+            devices: vec![
+                DiscoveredDevice {
+                    id: DeviceId::new("self-device"),
+                    display_name: "Self".to_string(),
+                    app_version: env!("CARGO_PKG_VERSION").to_string(),
+                    protocol_version: crate::models::DISCOVERY_PROTOCOL_VERSION,
+                    capabilities: crate::models::DeviceCapabilities::receiver(),
+                    availability: crate::models::DeviceAvailability::Available,
+                    status: DeviceStatus::SelfDevice,
+                    endpoint: Some(crate::models::TransportEndpoint {
+                        device_id: DeviceId::new("self-device"),
+                        address: std::net::SocketAddr::from(([192, 168, 8, 50], 51_700)),
+                    }),
+                    service_fullname: "self._synchrosonic._tcp.local.".to_string(),
+                    last_seen_unix_ms: 1,
+                },
+                DiscoveredDevice {
+                    id: DeviceId::new("reachable"),
+                    display_name: "Reachable".to_string(),
+                    app_version: env!("CARGO_PKG_VERSION").to_string(),
+                    protocol_version: crate::models::DISCOVERY_PROTOCOL_VERSION,
+                    capabilities: crate::models::DeviceCapabilities::receiver(),
+                    availability: crate::models::DeviceAvailability::Available,
+                    status: DeviceStatus::Reachable,
+                    endpoint: Some(crate::models::TransportEndpoint {
+                        device_id: DeviceId::new("reachable"),
+                        address: std::net::SocketAddr::from(([192, 168, 8, 51], 51_700)),
+                    }),
+                    service_fullname: "reachable._synchrosonic._tcp.local.".to_string(),
+                    last_seen_unix_ms: 1,
+                },
+            ],
+            updated_at_unix_ms: 1,
+        });
+
+        assert_eq!(
+            state
+                .selected_receiver_device_id
+                .as_ref()
+                .map(DeviceId::as_str),
+            Some("reachable")
+        );
+        assert!(!state.select_receiver_device(DeviceId::new("self-device")));
+        assert!(state.select_receiver_device(DeviceId::new("reachable")));
     }
 }

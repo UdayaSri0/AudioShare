@@ -173,6 +173,11 @@ pub struct DiscoverySubsystemSnapshot {
     pub poll: PollSnapshot,
     pub service_state: String,
     pub discovered_device_count: usize,
+    pub local_device_id: Option<String>,
+    pub advertisement_state: String,
+    pub advertised_endpoint: Option<String>,
+    pub last_advertised_unix_ms: Option<u64>,
+    pub last_advertisement_error: Option<String>,
     pub known_devices: Vec<KnownDeviceSnapshot>,
 }
 
@@ -200,6 +205,16 @@ pub struct StreamingSubsystemSnapshot {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UiSubsystemSnapshot {
     pub current_view_name: String,
+    pub refresh_requests: u64,
+    pub refresh_applied: u64,
+    pub refresh_skipped: u64,
+    pub list_rebuilds: u64,
+    pub list_skips: u64,
+    pub last_rendered_row_count: usize,
+    pub browser_join_active: bool,
+    pub browser_join_url: Option<String>,
+    pub browser_join_requests_served: u64,
+    pub browser_join_last_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -416,6 +431,30 @@ impl DiagnosticsRuntime {
         }
     }
 
+    pub fn update_discovery_local_snapshot(
+        &self,
+        service_state: String,
+        local_device_id: Option<String>,
+        advertisement_state: String,
+        advertised_endpoint: Option<String>,
+        last_advertised_unix_ms: Option<u64>,
+        last_advertisement_error: Option<String>,
+    ) {
+        if let Ok(mut snapshot_state) = self.inner.snapshot_state.lock() {
+            snapshot_state.current.updated_at_unix_ms = now_unix_ms();
+            snapshot_state.current.discovery.service_state = service_state;
+            snapshot_state.current.discovery.local_device_id = local_device_id;
+            snapshot_state.current.discovery.advertisement_state = advertisement_state;
+            snapshot_state.current.discovery.advertised_endpoint = advertised_endpoint;
+            snapshot_state.current.discovery.last_advertised_unix_ms = last_advertised_unix_ms;
+            snapshot_state.current.discovery.last_advertisement_error = last_advertisement_error;
+        }
+
+        if let Err(error) = self.persist_snapshot(false) {
+            tracing::warn!(error = %error, "failed to persist discovery local snapshot");
+        }
+    }
+
     pub fn note_poll(&self, poll_kind: PollKind, observation: PollObservation) {
         if let Ok(mut snapshot_state) = self.inner.snapshot_state.lock() {
             let poll = match poll_kind {
@@ -440,6 +479,63 @@ impl DiagnosticsRuntime {
 
         if let Err(error) = self.persist_snapshot(false) {
             tracing::warn!(error = %error, "failed to persist poll snapshot");
+        }
+    }
+
+    pub fn note_ui_refresh(&self, applied: bool) {
+        if let Ok(mut snapshot_state) = self.inner.snapshot_state.lock() {
+            snapshot_state.current.updated_at_unix_ms = now_unix_ms();
+            snapshot_state.current.ui.refresh_requests =
+                snapshot_state.current.ui.refresh_requests.saturating_add(1);
+            if applied {
+                snapshot_state.current.ui.refresh_applied =
+                    snapshot_state.current.ui.refresh_applied.saturating_add(1);
+            } else {
+                snapshot_state.current.ui.refresh_skipped =
+                    snapshot_state.current.ui.refresh_skipped.saturating_add(1);
+            }
+        }
+
+        if let Err(error) = self.persist_snapshot(false) {
+            tracing::warn!(error = %error, "failed to persist ui refresh metrics");
+        }
+    }
+
+    pub fn note_ui_list_render(&self, rebuilt: bool, row_count: usize) {
+        if let Ok(mut snapshot_state) = self.inner.snapshot_state.lock() {
+            snapshot_state.current.updated_at_unix_ms = now_unix_ms();
+            snapshot_state.current.ui.last_rendered_row_count = row_count;
+            if rebuilt {
+                snapshot_state.current.ui.list_rebuilds =
+                    snapshot_state.current.ui.list_rebuilds.saturating_add(1);
+            } else {
+                snapshot_state.current.ui.list_skips =
+                    snapshot_state.current.ui.list_skips.saturating_add(1);
+            }
+        }
+
+        if let Err(error) = self.persist_snapshot(false) {
+            tracing::warn!(error = %error, "failed to persist ui list render metrics");
+        }
+    }
+
+    pub fn update_browser_join_snapshot(
+        &self,
+        active: bool,
+        join_url: Option<String>,
+        requests_served: u64,
+        last_error: Option<String>,
+    ) {
+        if let Ok(mut snapshot_state) = self.inner.snapshot_state.lock() {
+            snapshot_state.current.updated_at_unix_ms = now_unix_ms();
+            snapshot_state.current.ui.browser_join_active = active;
+            snapshot_state.current.ui.browser_join_url = join_url;
+            snapshot_state.current.ui.browser_join_requests_served = requests_served;
+            snapshot_state.current.ui.browser_join_last_error = last_error;
+        }
+
+        if let Err(error) = self.persist_snapshot(false) {
+            tracing::warn!(error = %error, "failed to persist browser join snapshot");
         }
     }
 
@@ -509,6 +605,9 @@ impl DiagnosticsRuntime {
                 "Log path: {}\n",
                 "Crash reports path: {}\n",
                 "Discovery status: {} ({} device(s))\n",
+                "Discovery advertisement: {} on {}\n",
+                "UI refreshes: requested={} applied={} skipped={} list_rebuilds={} list_skips={}\n",
+                "Browser join prototype: active={} url={} served={} error={}\n",
                 "Receiver status: {} on {}\n",
                 "Sender status: {} with {} active target(s)\n",
                 "Active capture source: {}\n",
@@ -528,6 +627,29 @@ impl DiagnosticsRuntime {
             paths.crash_reports_dir.display(),
             snapshot.discovery.service_state,
             snapshot.discovery.discovered_device_count,
+            snapshot.discovery.advertisement_state,
+            snapshot
+                .discovery
+                .advertised_endpoint
+                .as_deref()
+                .unwrap_or("not advertised"),
+            snapshot.ui.refresh_requests,
+            snapshot.ui.refresh_applied,
+            snapshot.ui.refresh_skipped,
+            snapshot.ui.list_rebuilds,
+            snapshot.ui.list_skips,
+            snapshot.ui.browser_join_active,
+            snapshot
+                .ui
+                .browser_join_url
+                .as_deref()
+                .unwrap_or("not generated"),
+            snapshot.ui.browser_join_requests_served,
+            snapshot
+                .ui
+                .browser_join_last_error
+                .as_deref()
+                .unwrap_or("none"),
             snapshot.receiver.runtime_state,
             snapshot
                 .receiver

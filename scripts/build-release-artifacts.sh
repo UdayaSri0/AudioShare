@@ -25,8 +25,7 @@ bash "$ROOT/scripts/build-appimage.sh" --skip-build
 bash "$ROOT/scripts/build-deb.sh" --skip-build
 bash "$ROOT/scripts/build-flatpak.sh"
 
-version="$(cargo pkgid -p synchrosonic-app)"
-version="${version##*#}"
+version="$(python3 "$ROOT/scripts/read-workspace-version.py")"
 arch="$(uname -m)"
 
 if [[ "$arch" != "x86_64" ]]; then

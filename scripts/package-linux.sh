@@ -26,8 +26,7 @@ for arg in "$@"; do
     esac
 done
 
-pkgid="$(cargo pkgid -p synchrosonic-app)"
-version="${pkgid##*#}"
+version="$(python3 "$ROOT/scripts/read-workspace-version.py")"
 arch="$(uname -m)"
 
 case "$arch" in
@@ -88,8 +87,8 @@ Version: $version
 Section: sound
 Priority: optional
 Architecture: $deb_arch
-Maintainer: SynchroSonic Contributors
-Homepage: https://github.com/synchrosonic/synchrosonic
+Maintainer: UdayaSri0
+Homepage: https://github.com/UdayaSri0/AudioShare
 Description: Linux-first LAN audio casting and receiver control
  SynchroSonic is a GTK4/libadwaita desktop application for Linux that captures
  system audio, discovers LAN receivers, streams to local-network targets, and

@@ -12,7 +12,9 @@ choice, and first-pass Linux release metadata and packaging layouts.
 
 Current release posture:
 
-- First public tag target: `v0.1.6`, to be published as a GitHub release.
+- Canonical repository: `https://github.com/UdayaSri0/AudioShare`
+- Current release/tag target: `0.1.7` / `v0.1.7`
+- Developer / Maintainer: `UdayaSri0`
 - Native Linux release builds are supported.
 - The repository stages real native install, AppDir, and Debian filesystem layouts.
 - New release tooling now produces final `.AppImage`, `.deb`, and Flatpak `.flatpak` bundle artifacts on tagged builds.
@@ -117,14 +119,16 @@ Final packaging artifacts are built by `scripts/build-release-artifacts.sh` and
 published on tag-triggered GitHub releases. The staging scripts remain useful
 for local inspection and layout validation.
 
-For the first public tag, those staged artifacts should be presented as preview
-assets for `v0.1.6`, not as final signed installers.
+The current release line is `v0.1.7`, with source, issues, and release pages
+hosted at the canonical AudioShare repository.
 
 ## Community
 
 - Contributing guide: `CONTRIBUTING.md`
 - Security policy: `SECURITY.md`
 - Issue templates: `.github/ISSUE_TEMPLATE/`
+- Issues: `https://github.com/UdayaSri0/AudioShare/issues`
+- Releases: `https://github.com/UdayaSri0/AudioShare/releases`
 
 ## Screenshots
 

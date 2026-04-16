@@ -20,8 +20,7 @@ for arg in "$@"; do
     esac
 done
 
-version="$(cargo pkgid -p synchrosonic-app)"
-version="${version##*#}"
+version="$(python3 "$ROOT/scripts/read-workspace-version.py")"
 arch="$(uname -m)"
 case "$arch" in
     x86_64)
@@ -79,8 +78,8 @@ Version: $version
 Section: sound
 Priority: optional
 Architecture: $deb_arch
-Maintainer: SynchroSonic Contributors <synchrosonic@users.noreply.github.com>
-Homepage: https://github.com/synchrosonic/synchrosonic
+Maintainer: UdayaSri0
+Homepage: https://github.com/UdayaSri0/AudioShare
 Depends: $deps
 Description: Linux-first LAN audio casting and receiver control
  SynchroSonic is a GTK4/libadwaita desktop application for Linux that captures

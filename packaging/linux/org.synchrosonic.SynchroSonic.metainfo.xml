@@ -5,27 +5,26 @@
   <project_license>GPL-3.0-or-later</project_license>
   <name>SynchroSonic</name>
   <summary>Linux-first LAN audio casting and receiver control</summary>
-  <developer id="org.synchrosonic">
-    <name>SynchroSonic Contributors</name>
+  <developer id="io.github.udayasri0">
+    <name>UdayaSri0</name>
   </developer>
   <launchable type="desktop-id">org.synchrosonic.SynchroSonic.desktop</launchable>
   <provides>
     <binary>synchrosonic-app</binary>
   </provides>
-  <url type="homepage">https://github.com/synchrosonic/synchrosonic</url>
-  <url type="bugtracker">https://github.com/synchrosonic/synchrosonic/issues</url>
+  <url type="homepage">https://github.com/UdayaSri0/AudioShare</url>
+  <url type="bugtracker">https://github.com/UdayaSri0/AudioShare/issues</url>
   <releases>
-    <release version="0.1.6" date="2026-04-15">
+    <release version="0.1.7" date="2026-04-16">
       <description>
         <p>
-          Automated Linux packaging release for the Rust/GTK SynchroSonic desktop
-          app on Linux.
+          Metadata and release consistency update for the SynchroSonic desktop
+          app.
         </p>
         <p>
-          This release adds AppImage, Debian package, Flatpak bundle, and portable
-          tarball distribution formats with automated CI builds. Includes LAN discovery,
-          system-audio capture, receiver mode, synchronized multi-target casting,
-          diagnostics, and complete Linux packaging automation.
+          This release aligns the workspace, app, packaging, documentation, and
+          release automation on version 0.1.7 and the canonical AudioShare
+          repository owned by UdayaSri0.
         </p>
       </description>
     </release>
@@ -43,9 +42,8 @@
       limited to selecting local Linux playback outputs exposed by PipeWire.
     </p>
     <p>
-      The current public tag target is a release candidate rather than a stable
-      release because final signed packaging and a published private security
-      reporting path are not in place yet.
+      The current public release line uses version 0.1.7 and the canonical
+      AudioShare GitHub repository for source, releases, and issue tracking.
     </p>
   </description>
   <categories>

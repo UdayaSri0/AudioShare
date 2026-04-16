@@ -7,8 +7,7 @@ MANIFEST="$ROOT/packaging/flatpak/org.synchrosonic.SynchroSonic.yml"
 BUILD_DIR="$PACKAGE_ROOT/flatpak-build"
 REPO_DIR="$PACKAGE_ROOT/flatpak-repo"
 
-version="$(cargo pkgid -p synchrosonic-app)"
-version="${version##*#}"
+version="$(python3 "$ROOT/scripts/read-workspace-version.py")"
 
 if [[ ! -f "$MANIFEST" ]]; then
     printf 'Flatpak manifest not found at %s\n' "$MANIFEST" >&2

@@ -10,14 +10,14 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.1.6"
+version = "0.1.7"
 edition = "2021"
 rust-version = "1.85"
 license = "GPL-3.0-or-later"
-repository = "https://github.com/synchrosonic/synchrosonic"
-homepage = "https://github.com/synchrosonic/synchrosonic"
+repository = "https://github.com/UdayaSri0/AudioShare"
+homepage = "https://github.com/UdayaSri0/AudioShare"
 description = "Linux-first LAN audio casting and receiver control application"
-authors = ["SynchroSonic Contributors"]
+authors = ["UdayaSri0"]
 
 [workspace.dependencies]
 adw = { package = "libadwaita", version = "0.7" }

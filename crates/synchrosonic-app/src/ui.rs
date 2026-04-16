@@ -3208,32 +3208,37 @@ fn about_page() -> gtk::ScrolledWindow {
         metadata::release_channel_label(),
         metadata::release_channel_summary()
     ));
-    let developer_row = summary_row("Developers");
+    let developer_row = summary_row("Developer / Maintainer");
     developer_row.set_subtitle(&metadata::authors_display());
-    let source_row = summary_row("Source and license");
-    source_row.set_subtitle(&format!(
-        "{} · repo {}",
-        metadata::APP_LICENSE,
-        metadata::APP_REPOSITORY
-    ));
-    let support_row = summary_row("Support");
+    let repository_row = summary_row("Repository");
+    repository_row.set_subtitle(metadata::APP_REPOSITORY);
+    let issues_row = summary_row("Report issues");
+    issues_row.set_subtitle(metadata::APP_BUG_TRACKER);
+    let releases_row = summary_row("Releases");
+    releases_row.set_subtitle(metadata::APP_RELEASES);
+    let support_row = summary_row("Support docs");
     support_row.set_subtitle(&format!(
-        "Issues: {} · Security policy: {} · Contributing guide: {}",
-        metadata::APP_BUG_TRACKER,
+        "Security policy: {} · Contributing guide: {}",
         metadata::APP_SECURITY_POLICY_PATH,
         metadata::APP_CONTRIBUTING_PATH
     ));
-    let homepage_row = summary_row("Homepage");
-    homepage_row.set_subtitle(metadata::APP_HOMEPAGE);
+    let source_row = summary_row("Homepage and license");
+    source_row.set_subtitle(&format!(
+        "{} · {}",
+        metadata::APP_HOMEPAGE,
+        metadata::APP_LICENSE
+    ));
     let scope_row = summary_row("Current Bluetooth scope");
     scope_row.set_subtitle("Bluetooth is treated as a local playback-output choice on Linux, not as a separate streaming transport or receiver discovery path.");
     about_group.add(&project_row);
     about_group.add(&version_row);
     about_group.add(&release_channel_row);
     about_group.add(&developer_row);
-    about_group.add(&source_row);
+    about_group.add(&repository_row);
+    about_group.add(&issues_row);
+    about_group.add(&releases_row);
     about_group.add(&support_row);
-    about_group.add(&homepage_row);
+    about_group.add(&source_row);
     about_group.add(&scope_row);
     content.append(&about_group);
 

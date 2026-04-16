@@ -37,9 +37,9 @@ Important output paths:
 The packaging script creates tarballs in `target/release-packaging/` with names
 like:
 
-- `synchrosonic-<version>-<arch>-native-layout.tar.gz`
-- `synchrosonic-<version>-<arch>-AppDir.tar.gz`
-- `synchrosonic-<version>-<arch>-deb-layout.tar.gz`
+- `synchrosonic-<version>-linux-<arch>.tar.gz`
+- `synchrosonic-<version>-linux-<arch>-AppDir.tar.gz`
+- `synchrosonic-<version>-linux-<arch>-deb-layout.tar.gz`
 
 ## Linux Packaging Workflow
 
@@ -80,7 +80,7 @@ This will also create:
 
 `scripts/package-linux.sh`:
 
-- reads the package version from `cargo pkgid -p synchrosonic-app`
+- reads the workspace version from the root `Cargo.toml` via `scripts/read-workspace-version.py`
 - builds `target/release/synchrosonic-app` unless `--skip-build` is passed
 - installs the binary plus desktop assets into staging layouts
 - generates a Debian-style `DEBIAN/control`
@@ -111,12 +111,11 @@ What is implemented today:
 - release binary builds for `synchrosonic-app`
 - Linux staging layouts for native install trees, AppDir, and Debian-style
   filesystem trees
-- CI artifact upload of those staged layouts
+- AppImage, Debian `.deb`, Flatpak bundle, portable tarball, and checksum
+  generation for tagged releases
 
 What is not currently automated:
 
-- final signed AppImage generation
-- final dependency-complete `.deb` production
 - signing or repository publication
 
 ## Relationship To GitHub Actions
@@ -138,4 +137,3 @@ cargo test --workspace
 cargo build --release -p synchrosonic-app
 bash scripts/package-linux.sh --skip-build
 ```
-

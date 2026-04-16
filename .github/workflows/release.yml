@@ -28,11 +28,13 @@ jobs:
 
       - name: Validate tag/version consistency
         run: |
-          version="$(cargo pkgid -p synchrosonic-app)"
-          version="${version##*#}"
-          tag="${GITHUB_REF#refs/tags/}"
-          if [[ "v$version" != "$tag" ]]; then
-            echo "Tag mismatch: cargo version=$version tag=$tag" >&2
+          VERSION="$(python3 scripts/read-workspace-version.py)"
+          TAG="${GITHUB_REF#refs/tags/}"
+          EXPECTED_TAG="v${VERSION}"
+          echo "workspace version: ${VERSION}"
+          echo "git tag: ${TAG}"
+          if [[ "${TAG}" != "${EXPECTED_TAG}" ]]; then
+            echo "Tag mismatch: workspace version=${VERSION} tag=${TAG}" >&2
             exit 1
           fi
 

@@ -6,6 +6,8 @@ Use this checklist before publishing a Linux release of SynchroSonic.
 
 - Confirm the root `LICENSE` file is present.
 - Decide whether to expand the current short-form GPL notice to the full license text.
+- Confirm the root workspace version in `Cargo.toml` matches the tag to be published.
+- Confirm repository, issues, and releases links point to `https://github.com/UdayaSri0/AudioShare`.
 - Update [CHANGELOG.md](../CHANGELOG.md) for the release being tagged.
 - Review [README.md](../README.md) for version-specific wording.
 - Review [CONTRIBUTING.md](../CONTRIBUTING.md) and [SECURITY.md](../SECURITY.md).

@@ -38,8 +38,8 @@ command -v pw-play
 Clone the repository, move to the project root, and run the desktop app:
 
 ```bash
-git clone https://github.com/synchrosonic/synchrosonic.git
-cd synchrosonic
+git clone https://github.com/UdayaSri0/AudioShare.git
+cd AudioShare
 cargo run -p synchrosonic-app
 ```
 
@@ -78,7 +78,7 @@ If you want to open the binary from the staged native layout:
 
 ```bash
 mkdir -p /tmp/synchrosonic-native
-tar -xzf target/release-packaging/*-native-layout.tar.gz -C /tmp/synchrosonic-native
+tar -xzf target/release-packaging/synchrosonic-*-linux-$(uname -m).tar.gz -C /tmp/synchrosonic-native
 /tmp/synchrosonic-native/usr/bin/synchrosonic-app
 ```
 
@@ -104,4 +104,3 @@ If you need more detail after this quick guide, use:
 - [Developer Docs](./developer/README.md)
 - [Running Locally](./developer/running-locally.md)
 - [Troubleshooting](./developer/troubleshooting.md)
-

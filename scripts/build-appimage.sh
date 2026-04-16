@@ -22,8 +22,7 @@ for arg in "$@"; do
     esac
 done
 
-version="$(cargo pkgid -p synchrosonic-app)"
-version="${version##*#}"
+version="$(python3 "$ROOT/scripts/read-workspace-version.py")"
 arch="$(uname -m)"
 if [[ "$arch" != "x86_64" ]]; then
     printf 'unsupported architecture: %s\n' "$arch" >&2

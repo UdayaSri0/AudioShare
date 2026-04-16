@@ -10,25 +10,20 @@ This document is a production-ready instruction pack for Codex to:
 ---
 
 ## Important release correction
-The repository currently describes the first public build as `0.1.0-rc.1`, while an existing GitHub release is tagged `v0.1.0`.
+The repository now targets the canonical public release `0.1.7` with GitHub tag
+`v0.1.7`.
 
-For the next release, Codex must clean up versioning and avoid another mismatch.
+For this release, Codex must keep versioning, ownership metadata, documentation,
+and packaging aligned on the canonical AudioShare repository.
 
 ### Versioning decision rule
-Use one of these two paths:
+Use this release baseline:
 
-1. **Recommended if packaging is still being completed:**
-   - bump workspace version to `0.1.0-rc.2`
-   - publish GitHub tag `v0.1.0-rc.2`
-   - mark the release as a **pre-release**
+1. bump workspace version to `0.1.7`
+2. publish GitHub tag `v0.1.7`
+3. mark the release as a stable release only after validation passes
 
-2. **Use only if all package outputs are truly validated and installable:**
-   - bump workspace version to `0.1.1`
-   - publish GitHub tag `v0.1.1`
-   - mark the release as a stable release
-
-Do not reuse `v0.1.0`.
-Do not claim “stable” if AppImage, Debian, and Flatpak are not actually tested.
+Do not leave mismatched version or tag references behind.
 
 ---
 
@@ -138,10 +133,10 @@ Fix versioning so there is no mismatch between:
 - README release wording
 
 Use this decision rule:
-- if packaging is still prerelease quality, use `0.1.0-rc.2` and tag `v0.1.0-rc.2`
-- if packaging is genuinely release-quality and validated, use `0.1.1` and tag `v0.1.1`
+- align the workspace version, package metadata, About page, docs, and release assets on `0.1.7`
+- publish the matching GitHub tag `v0.1.7` only after validation passes
 
-Never leave mixed `v0.1.0` and `0.1.0-rc.1` references behind.
+Never leave mixed version or tag references behind.
 
 ### Phase 3 — real AppImage output
 Build on the existing AppDir staging flow.
@@ -296,8 +291,8 @@ When you finish, provide:
 
 ## Final release naming rule
 Use this logic at the end:
-- if AppImage + `.deb` + Flatpak + checksums are all produced and validated, suggest `v0.1.1`
-- otherwise suggest `v0.1.0-rc.2`
+- if AppImage + `.deb` + Flatpak + checksums are all produced and validated, suggest `v0.1.7`
+- otherwise stop and fix the blockers before tagging
 
 Now execute the work carefully and incrementally.
 ```
@@ -328,24 +323,19 @@ At the end, return the changed files, remaining blockers, a final tag suggestion
 
 ## Recommended next tag
 
-### Best choice if packaging work is still being finished
-- **Tag:** `v0.1.0-rc.2`
-- **Release title:** `SynchroSonic v0.1.0-rc.2`
-- **Release type:** Pre-release
-
-### Best choice only if Codex finishes and validates all installer formats
-- **Tag:** `v0.1.1`
-- **Release title:** `SynchroSonic v0.1.1`
+### Canonical release target
+- **Tag:** `v0.1.7`
+- **Release title:** `SynchroSonic v0.1.7`
 - **Release type:** Stable
 
 ---
 
-## Copy-paste GitHub release description for `v0.1.0-rc.2`
+## Copy-paste GitHub release description for `v0.1.7`
 
 ```md
-## SynchroSonic v0.1.0-rc.2
+## SynchroSonic v0.1.7
 
-This release advances SynchroSonic from Linux packaging staging outputs toward real end-user installable artifacts.
+This release aligns SynchroSonic metadata, packaging, and release automation on the canonical AudioShare repository.
 
 ### Highlights
 - Linux-first Rust + GTK4/libadwaita desktop application for LAN audio casting and receiver playback

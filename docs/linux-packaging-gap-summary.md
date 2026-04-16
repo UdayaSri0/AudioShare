@@ -1,6 +1,6 @@
 # Linux Packaging Gap Summary
 
-This summary reflects the current packaging state after the `0.1.9` release
+This summary reflects the current packaging state after the `0.1.10` release
 alignment work.
 
 ## Implemented
@@ -17,12 +17,15 @@ alignment work.
   `https://github.com/UdayaSri0/AudioShare`
 - Debian source metadata committed under `debian/control` and `debian/changelog`
 - unsigned APT repository scaffolding through `scripts/build-apt-repo.sh`
+- signed GitHub Pages APT publication workflow through
+  `.github/workflows/publish-apt-repository.yml`
 
 ## Remaining Gaps
 
 - signing is still manual
 - GitHub release publication still depends on the tagged workflow run
-- APT publication is scaffolded but not signed or hosted automatically yet
+- signed APT publication remains a manual secret-gated workflow rather than part
+  of the main tagged release job
 - Flatpak runtime behavior remains preview-quality because the current backend
   depends on host PipeWire CLI tools
 - release pages still need screenshots and broader install validation coverage

@@ -2,6 +2,18 @@
 
 All notable changes to SynchroSonic will be documented in this file.
 
+## [0.1.10] - 2026-04-16
+
+### Added
+
+- Added documented packaging targets for RPM, Arch Linux, Snap, and signed APT repository publication through a separate GitHub Pages workflow.
+
+### Changed
+
+- Refreshed release-facing docs, issue templates, and AppStream metadata so the public `0.1.10` line matches the current packaging outputs and canonical AudioShare repository links.
+- Tightened packaging guidance around preview-only paths such as Flatpak runtime validation and manual signed APT publication.
+- Updated the portable tarball docs to match the deterministic top-level archive layout now produced by the packaging scripts.
+
 ## [0.1.9] - 2026-04-16
 
 ### Fixed

@@ -1,0 +1,44 @@
+%global debug_package %{nil}
+%global _build_id_links none
+
+Name:           synchrosonic
+Version:        @VERSION@
+Release:        @RELEASE@%{?dist}
+Summary:        Linux-first LAN audio streaming and casting application
+
+License:        GPL-3.0-or-later
+URL:            https://github.com/UdayaSri0/AudioShare
+Source0:        @SOURCE_ARCHIVE@
+BuildArch:      @RPM_ARCH@
+Requires:       /usr/bin/pw-dump
+Requires:       /usr/bin/pw-record
+Requires:       /usr/bin/pw-play
+
+%description
+SynchroSonic is a GTK4/libadwaita desktop application for Linux that captures
+system audio, discovers LAN receivers, streams to local-network targets, and
+keeps local playback routing and diagnostics available on the sender.
+
+%prep
+%setup -q -c -T
+
+%build
+# The release binary and install tree are prepared before rpmbuild runs.
+
+%install
+rm -rf %{buildroot}
+mkdir -p %{buildroot}
+tar -xzf %{SOURCE0} -C %{buildroot}
+
+%files
+%license %{_docdir}/synchrosonic/LICENSE
+%doc %{_docdir}/synchrosonic/README.md
+%doc %{_docdir}/synchrosonic/linux-packaging.md
+%{_bindir}/synchrosonic-app
+%{_datadir}/applications/org.synchrosonic.SynchroSonic.desktop
+%{_datadir}/icons/hicolor/scalable/apps/org.synchrosonic.SynchroSonic.svg
+%{_datadir}/metainfo/org.synchrosonic.SynchroSonic.metainfo.xml
+
+%changelog
+* Thu Apr 16 2026 UdayaSri0 - @VERSION@-@RELEASE@
+- Package SynchroSonic @VERSION@

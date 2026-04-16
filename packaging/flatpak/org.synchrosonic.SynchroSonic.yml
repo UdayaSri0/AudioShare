@@ -3,6 +3,9 @@ runtime: org.freedesktop.Platform
 runtime-version: '24.08'
 sdk: org.freedesktop.Sdk
 command: synchrosonic-app
+branch: stable
+# Preview/runtime-sensitive finish args: the current backend still relies on
+# PipeWire sockets and host-side PipeWire CLI tooling at runtime.
 finish-args:
   - --share=ipc
   - --share=network
@@ -12,8 +15,6 @@ finish-args:
   - --socket=pipewire
   - --device=dri
   - --filesystem=/run/user
-  - --talk-name=org.freedesktop.Notifications
-  - --talk-name=org.freedesktop.Flatpak
 modules:
   - name: synchrosonic
     buildsystem: simple

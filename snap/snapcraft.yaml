@@ -1,0 +1,68 @@
+name: synchrosonic
+title: SynchroSonic
+adopt-info: synchrosonic
+summary: Linux-first LAN audio streaming and casting application
+description: |
+  SynchroSonic captures Linux system audio, discovers LAN receivers, streams
+  audio across local networks, and can optionally keep playback active on the
+  sender.
+
+  This snap bundles the PipeWire CLI tools the current runtime shells out to,
+  but capture and receiver features remain confinement-sensitive and should be
+  treated as a preview path until more host-integration testing is completed.
+base: core24
+grade: stable
+confinement: strict
+license: GPL-3.0-or-later
+website: https://github.com/UdayaSri0/AudioShare
+source-code: https://github.com/UdayaSri0/AudioShare
+issues: https://github.com/UdayaSri0/AudioShare/issues
+icon: packaging/linux/org.synchrosonic.SynchroSonic.svg
+
+apps:
+  synchrosonic:
+    extensions: [gnome]
+    command: usr/bin/synchrosonic-app
+    desktop: usr/share/applications/org.synchrosonic.SynchroSonic.desktop
+    common-id: org.synchrosonic.SynchroSonic.desktop
+    environment:
+      PATH: $SNAP/usr/bin:$PATH
+    plugs:
+      - network
+      - network-bind
+      - audio-playback
+      - audio-record
+      - pipewire
+
+slots:
+  synchrosonic:
+    interface: dbus
+    bus: session
+    name: org.synchrosonic.SynchroSonic
+
+parts:
+  synchrosonic:
+    plugin: nil
+    source: .
+    build-packages:
+      - cargo
+      - rustc
+      - pkg-config
+      - libgtk-4-dev
+      - libadwaita-1-dev
+    stage-packages:
+      - pipewire-bin
+    override-pull: |
+      craftctl default
+      craftctl set version="$(python3 "$CRAFT_PART_SRC/scripts/read-workspace-version.py")"
+    override-build: |
+      set -eux
+      cargo build --release -p synchrosonic-app
+
+      install -Dm755 target/release/synchrosonic-app "$CRAFT_PART_INSTALL/usr/bin/synchrosonic-app"
+      install -Dm644 packaging/linux/org.synchrosonic.SynchroSonic.desktop "$CRAFT_PART_INSTALL/usr/share/applications/org.synchrosonic.SynchroSonic.desktop"
+      install -Dm644 packaging/linux/org.synchrosonic.SynchroSonic.metainfo.xml "$CRAFT_PART_INSTALL/usr/share/metainfo/org.synchrosonic.SynchroSonic.metainfo.xml"
+      install -Dm644 packaging/linux/org.synchrosonic.SynchroSonic.svg "$CRAFT_PART_INSTALL/usr/share/icons/hicolor/scalable/apps/org.synchrosonic.SynchroSonic.svg"
+      install -Dm644 README.md "$CRAFT_PART_INSTALL/usr/share/doc/synchrosonic/README.md"
+      install -Dm644 LICENSE "$CRAFT_PART_INSTALL/usr/share/doc/synchrosonic/LICENSE"
+      install -Dm644 docs/linux-packaging.md "$CRAFT_PART_INSTALL/usr/share/doc/synchrosonic/linux-packaging.md"

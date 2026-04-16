@@ -66,8 +66,8 @@ Then start it directly:
 ## Option 3: Run From The Packaged Files Created By This Repo
 
 This repository can stage Linux packaging layouts locally, and the tagged
-release flow can build AppImage, Debian, Flatpak, tarball, and checksum
-artifacts.
+release flow can build AppImage, Debian, Flatpak, tarball, checksum, and
+release-manifest artifacts.
 
 Create the staging files:
 
@@ -79,8 +79,10 @@ If you want to open the binary from the staged native layout:
 
 ```bash
 mkdir -p /tmp/synchrosonic-native
-tar -xzf target/release-packaging/synchrosonic-*-linux-$(uname -m).tar.gz -C /tmp/synchrosonic-native
-/tmp/synchrosonic-native/usr/bin/synchrosonic-app
+tarball="$(find target/release-packaging -maxdepth 1 -name 'synchrosonic-*-linux-*.tar.gz' | head -n1)"
+tar -xzf "$tarball" -C /tmp/synchrosonic-native
+native_root="$(find /tmp/synchrosonic-native -maxdepth 1 -type d -name 'synchrosonic-*-linux-*' | head -n1)"
+"$native_root/usr/bin/synchrosonic-app"
 ```
 
 If you want the full release artifact set locally, run:

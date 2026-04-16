@@ -2,6 +2,7 @@
 set -euo pipefail
 
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+APP_ID="org.synchrosonic.SynchroSonic"
 APP_BINARY="synchrosonic-app"
 PACKAGE_NAME="synchrosonic"
 PACKAGE_ROOT="$ROOT/target/release-packaging"
@@ -22,6 +23,34 @@ for arg in "$@"; do
     esac
 done
 
+die() {
+    printf '%s\n' "$1" >&2
+    exit 1
+}
+
+require_command() {
+    local command_name="$1"
+    if ! command -v "$command_name" >/dev/null 2>&1; then
+        die "required command not found on PATH: $command_name"
+    fi
+}
+
+require_file() {
+    local path="$1"
+    local description="$2"
+    if [[ ! -f "$path" ]]; then
+        die "missing ${description}: $path"
+    fi
+}
+
+require_executable() {
+    local path="$1"
+    local description="$2"
+    if [[ ! -x "$path" ]]; then
+        die "missing executable ${description}: $path"
+    fi
+}
+
 version="$(python3 "$ROOT/scripts/read-workspace-version.py")"
 arch="$(uname -m)"
 case "$arch" in
@@ -35,9 +64,13 @@ case "$arch" in
         deb_arch="armhf"
         ;;
     *)
-        deb_arch="$arch"
-        ;;
+        die "unsupported Debian packaging architecture: $arch"
+    ;;
 esac
+
+require_command dpkg-shlibdeps
+require_command dpkg-gencontrol
+require_command dpkg-deb
 
 if [[ "$SKIP_BUILD" -eq 0 ]]; then
     bash "$PACKAGE_SCRIPT"
@@ -51,31 +84,50 @@ SUBSTVARS_DIR="$PACKAGE_ROOT/debian"
 SUBSTVARS_FILE="$SUBSTVARS_DIR/substvars"
 FILES_LIST_FILE="$SUBSTVARS_DIR/files"
 output="$PACKAGE_ROOT/${PACKAGE_NAME}_${version}_${deb_arch}.deb"
+DESKTOP_INSTALL="$DEB_ROOT/usr/share/applications/$APP_ID.desktop"
+ICON_INSTALL="$DEB_ROOT/usr/share/icons/hicolor/scalable/apps/$APP_ID.svg"
+METAINFO_INSTALL="$DEB_ROOT/usr/share/metainfo/$APP_ID.metainfo.xml"
+DOC_ROOT="$DEB_ROOT/usr/share/doc/$PACKAGE_NAME"
+CHANGELOG_VERSION="$(sed -n '1s/^[^(]*(\([^)]*\)).*/\1/p' "$CHANGELOG_FILE")"
 
-if [[ ! -x "$BINARY" ]]; then
-    printf 'release binary not found in staged Debian tree at %s\n' "$BINARY" >&2
-    exit 1
+require_executable "$BINARY" "staged Debian binary"
+require_file "$SOURCE_CONTROL" "Debian source control file"
+require_file "$CHANGELOG_FILE" "Debian changelog"
+require_file "$DESKTOP_INSTALL" "staged desktop file"
+require_file "$ICON_INSTALL" "staged icon"
+require_file "$METAINFO_INSTALL" "staged AppStream metadata"
+require_file "$DOC_ROOT/README.md" "staged README"
+require_file "$DOC_ROOT/LICENSE" "staged LICENSE"
+require_file "$DOC_ROOT/linux-packaging.md" "staged packaging documentation"
+
+if [[ "$(sed -n '/./{p;q;}' "$SOURCE_CONTROL")" != Source:* ]]; then
+    die "debian/control must begin with a Source: stanza"
 fi
 
-if [[ ! -f "$SOURCE_CONTROL" ]]; then
-    printf 'expected Debian source control file at %s\n' "$SOURCE_CONTROL" >&2
-    exit 1
+if ! grep -q '^Package:' "$SOURCE_CONTROL"; then
+    die "debian/control is missing a Package: stanza"
 fi
 
-if [[ ! -f "$CHANGELOG_FILE" ]]; then
-    printf 'expected Debian changelog at %s\n' "$CHANGELOG_FILE" >&2
-    exit 1
+if [[ -z "$CHANGELOG_VERSION" ]]; then
+    die "unable to parse the package version from debian/changelog"
+fi
+
+if [[ "$CHANGELOG_VERSION" != "$version" ]]; then
+    die "debian/changelog version ($CHANGELOG_VERSION) does not match workspace version ($version)"
 fi
 
 mkdir -p "$DEB_ROOT/DEBIAN" "$SUBSTVARS_DIR"
 rm -f "$SUBSTVARS_FILE" "$FILES_LIST_FILE" "$DEB_ROOT/DEBIAN/control" "$ROOT/debian/files"
 
-dpkg-shlibdeps -T"$SUBSTVARS_FILE" "$BINARY"
+if ! dpkg-shlibdeps -T"$SUBSTVARS_FILE" "$BINARY"; then
+    die "dpkg-shlibdeps failed while resolving shared-library dependencies for $BINARY"
+fi
+
 if ! grep -q '^misc:Depends=' "$SUBSTVARS_FILE"; then
     printf 'misc:Depends=\n' >>"$SUBSTVARS_FILE"
 fi
 
-dpkg-gencontrol \
+if ! dpkg-gencontrol \
     -p"$PACKAGE_NAME" \
     -c"$SOURCE_CONTROL" \
     -l"$CHANGELOG_FILE" \
@@ -84,16 +136,23 @@ dpkg-gencontrol \
     -P"$DEB_ROOT" \
     -n"$(basename "$output")" \
     -DArchitecture="$deb_arch" \
-    -v"$version" >/dev/null
-
-if [[ ! -f "$DEB_ROOT/DEBIAN/control" ]]; then
-    printf 'failed to generate binary package control file at %s\n' "$DEB_ROOT/DEBIAN/control" >&2
-    exit 1
+    -v"$version" >/dev/null; then
+    die "dpkg-gencontrol failed while generating $DEB_ROOT/DEBIAN/control"
 fi
 
-dpkg-deb --build "$DEB_ROOT" "$output"
+require_file "$DEB_ROOT/DEBIAN/control" "generated binary control file"
 
-dpkg-deb --info "$output" >/dev/null 2>&1
-dpkg-deb --contents "$output" >/dev/null 2>&1
+if ! dpkg-deb --build "$DEB_ROOT" "$output"; then
+    die "dpkg-deb failed while building the final package at $output"
+fi
+
+if ! dpkg-deb --info "$output" >/dev/null; then
+    die "dpkg-deb --info failed for $output"
+fi
+
+if ! dpkg-deb --contents "$output" >/dev/null; then
+    die "dpkg-deb --contents failed for $output"
+fi
 
 printf 'Built Debian package: %s\n' "$output"
+printf 'Validated package metadata with dpkg-deb --info and dpkg-deb --contents.\n'

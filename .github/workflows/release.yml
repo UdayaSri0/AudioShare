@@ -3,47 +3,79 @@ name: Release Packaging
 on:
   push:
     tags:
-      - 'v*'
+      - "v*"
 
 permissions:
   contents: write
 
 jobs:
   release-package:
+    name: Build and Publish Linux Release Assets
     runs-on: ubuntu-latest
 
+    defaults:
+      run:
+        shell: bash
+
+    env:
+      CARGO_TERM_COLOR: always
+
     steps:
+      # Check out the tagged commit that will be packaged and published.
       - name: Check out repository
         uses: actions/checkout@v4
 
+      # Install native dependencies used by the GTK build, Debian packaging,
+      # Flatpak bundling, AppImage validation, and release scripts.
       - name: Install Linux build dependencies
         run: |
+          set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y pkg-config libgtk-4-dev libadwaita-1-dev desktop-file-utils appstream dbus-user-session dpkg-dev flatpak flatpak-builder curl libfuse2
+          sudo apt-get install -y \
+            appstream \
+            curl \
+            dbus-user-session \
+            desktop-file-utils \
+            dpkg-dev \
+            flatpak \
+            flatpak-builder \
+            libadwaita-1-dev \
+            libfuse2 \
+            libgtk-4-dev \
+            pkg-config
 
+      # Install the stable Rust toolchain plus the components used by CI checks.
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
 
+      # Refuse to publish if the pushed tag and the workspace version drift apart.
       - name: Validate tag/version consistency
         run: |
+          set -euo pipefail
+
           VERSION="$(python3 - <<'PY'
-from pathlib import Path
-import tomllib
-data = tomllib.loads(Path('Cargo.toml').read_text())
-print(data['workspace']['package']['version'])
-PY
-)"
+          from pathlib import Path
+          import tomllib
+
+          data = tomllib.loads(Path('Cargo.toml').read_text())
+          print(data['workspace']['package']['version'])
+          PY
+          )"
+
           TAG="${GITHUB_REF#refs/tags/}"
           EXPECTED_TAG="v${VERSION}"
+
           echo "workspace version: ${VERSION}"
           echo "git tag: ${TAG}"
+
           if [[ "${TAG}" != "${EXPECTED_TAG}" ]]; then
             echo "Tag mismatch: workspace version=${VERSION} tag=${TAG}" >&2
             exit 1
           fi
 
+      # Run the same Rust quality gates expected before publishing a release.
       - name: Check formatting
         run: cargo fmt --all --check
 
@@ -53,25 +85,44 @@ PY
       - name: Run tests
         run: cargo test --workspace
 
+      # Build the release binary first so the packaging scripts can reuse it.
       - name: Build release binary
         run: cargo build --release -p synchrosonic-app
 
+      # Assemble the full Linux release artifact set from the repo scripts.
       - name: Build release artifacts
         run: bash scripts/build-release-artifacts.sh --skip-build
 
+      # Fail before publishing if any expected artifact is missing.
       - name: Verify release artifacts
         run: bash scripts/verify-release-artifacts.sh
 
+      # Resolve the version-specific release notes file from the pushed tag.
+      - name: Resolve release notes file
+        id: release_notes
+        run: |
+          set -euo pipefail
+          NOTES_FILE="RELEASE_NOTES_${GITHUB_REF_NAME}.md"
+          if [[ ! -f "$NOTES_FILE" ]]; then
+            echo "Missing release notes file: ${NOTES_FILE}" >&2
+            exit 1
+          fi
+          echo "path=${NOTES_FILE}" >> "$GITHUB_OUTPUT"
+
+      # Upload the finished Linux installers and checksum manifest to the GitHub release.
       - name: Publish release assets
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
           name: SynchroSonic ${{ github.ref_name }}
+          body_path: ${{ steps.release_notes.outputs.path }}
+          fail_on_unmatched_files: true
           files: |
             target/release-packaging/*.AppImage
             target/release-packaging/*.deb
             target/release-packaging/*.flatpak
             target/release-packaging/*.tar.gz
             target/release-packaging/SHA256SUMS.txt
+            target/release-packaging/RELEASE_MANIFEST.json
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

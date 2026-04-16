@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 PACKAGE_ROOT="$ROOT/target/release-packaging"
 CACHE_ROOT="$ROOT/target/release-artifacts-cache"
+MANIFEST_PATH="$PACKAGE_ROOT/RELEASE_MANIFEST.json"
 
 SKIP_BUILD=0
 for arg in "$@"; do
@@ -55,6 +56,12 @@ artifacts=(
     "$PACKAGE_ROOT/synchrosonic-${version}.flatpak"
     "$PACKAGE_ROOT/synchrosonic-${version}-linux-${arch}.tar.gz"
 )
+artifact_kinds=(
+    "appimage"
+    "debian-package"
+    "flatpak-bundle"
+    "portable-tarball"
+)
 
 for artifact in "${artifacts[@]}"; do
     if [[ ! -f "$artifact" ]]; then
@@ -63,9 +70,58 @@ for artifact in "${artifacts[@]}"; do
     fi
 done
 
-cd "$PACKAGE_ROOT"
-sha256sum "${artifacts[@]}" > SHA256SUMS.txt
+manifest_input="$CACHE_ROOT/release-artifacts.tsv"
+: >"$manifest_input"
+for index in "${!artifacts[@]}"; do
+    printf '%s\t%s\n' "${artifact_kinds[$index]}" "${artifacts[$index]}" >>"$manifest_input"
+done
+
+python3 - "$version" "$arch" "$PACKAGE_ROOT" "$manifest_input" "$MANIFEST_PATH" <<'PY'
+from __future__ import annotations
+
+import hashlib
+import json
+import sys
+from pathlib import Path
+
+version, arch, package_root, manifest_input, manifest_path = sys.argv[1:]
+package_root_path = Path(package_root)
+manifest_entries = []
+checksum_lines = []
+
+with Path(manifest_input).open("r", encoding="utf-8") as handle:
+    for raw_line in handle:
+        kind, raw_path = raw_line.rstrip("\n").split("\t", 1)
+        path = Path(raw_path)
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        filename = path.name
+        checksum_lines.append(f"{digest}  {filename}")
+        manifest_entries.append(
+            {
+                "kind": kind,
+                "filename": filename,
+                "size_bytes": path.stat().st_size,
+                "sha256": digest,
+            }
+        )
+
+(package_root_path / "SHA256SUMS.txt").write_text("\n".join(checksum_lines) + "\n", encoding="utf-8")
+Path(manifest_path).write_text(
+    json.dumps(
+        {
+            "product": "SynchroSonic",
+            "version": version,
+            "architecture": arch,
+            "artifacts": manifest_entries,
+        },
+        indent=2,
+    )
+    + "\n",
+    encoding="utf-8",
+)
+PY
 
 bash "$ROOT/scripts/verify-release-artifacts.sh"
 
 printf 'Generated checksum manifest: %s/SHA256SUMS.txt\n' "$PACKAGE_ROOT"
+printf 'Generated release manifest: %s\n' "$MANIFEST_PATH"

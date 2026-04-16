@@ -37,10 +37,11 @@ Use this checklist before publishing a Linux release of SynchroSonic.
 - Inspect the AppDir staging layout in `target/release-packaging/AppDir`.
 - Inspect the Debian staging layout in `target/release-packaging/deb`.
 - Verify the generated `.deb` metadata comes from Debian tooling rather than a staged control-file copy.
-- Verify the release asset directory contains final `.AppImage`, `.deb`, `.flatpak`, portable tarball, and `SHA256SUMS.txt`.
+- Verify the release asset directory contains final `.AppImage`, `.deb`, `.flatpak`, portable tarball, `SHA256SUMS.txt`, and `RELEASE_MANIFEST.json`.
 - If shipping a final AppImage, validate the selected toolchain and signing flow.
 - If shipping a final `.deb`, validate dependency metadata and install/remove behavior.
-- If shipping APT metadata, confirm the scaffold is clearly described as unsigned unless signing was completed.
+- If shipping a signed APT repository, validate the separate Pages workflow, signing secrets, and generated `InRelease` / `Release.gpg` files.
+- If shipping only the local APT scaffold, make sure docs still describe it as an unsigned local output rather than a published feed.
 
 ## Documentation
 

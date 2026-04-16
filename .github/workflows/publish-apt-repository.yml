@@ -1,0 +1,122 @@
+name: Publish APT Repository
+
+on:
+  workflow_dispatch:
+    inputs:
+      git_ref:
+        description: Git ref to publish from
+        required: true
+        default: main
+
+permissions:
+  contents: read
+  id-token: write
+  pages: write
+
+concurrency:
+  group: apt-pages
+  cancel-in-progress: true
+
+jobs:
+  publish-apt-repo:
+    name: Build And Publish Signed APT Repository
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.git_ref }}
+
+      - name: Install Linux build and signing dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y \
+            appstream \
+            desktop-file-utils \
+            dpkg-dev \
+            gnupg \
+            libadwaita-1-dev \
+            libgtk-4-dev \
+            pkg-config
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build release binary
+        run: cargo build --release -p synchrosonic-app
+
+      - name: Build Debian package
+        run: bash scripts/build-deb.sh --skip-build
+
+      - name: Determine GitHub Pages repository URL
+        id: repo_url
+        run: |
+          set -euo pipefail
+          repo_name="${GITHUB_REPOSITORY#*/}"
+          echo "url=https://${GITHUB_REPOSITORY_OWNER}.github.io/${repo_name}" >> "$GITHUB_OUTPUT"
+
+      - name: Import APT signing key
+        id: gpg
+        env:
+          APT_GPG_PASSPHRASE: ${{ secrets.APT_GPG_PASSPHRASE }}
+          APT_GPG_PRIVATE_KEY_BASE64: ${{ secrets.APT_GPG_PRIVATE_KEY_BASE64 }}
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${APT_GPG_PRIVATE_KEY_BASE64:-}" ]]; then
+            echo "Missing repository secret: APT_GPG_PRIVATE_KEY_BASE64" >&2
+            exit 1
+          fi
+
+          if [[ -z "${APT_GPG_PASSPHRASE:-}" ]]; then
+            echo "Missing repository secret: APT_GPG_PASSPHRASE" >&2
+            exit 1
+          fi
+
+          GNUPGHOME="$RUNNER_TEMP/apt-gnupg"
+          mkdir -p "$GNUPGHOME"
+          chmod 700 "$GNUPGHOME"
+          export GNUPGHOME
+
+          printf '%s' "$APT_GPG_PRIVATE_KEY_BASE64" | base64 --decode | gpg --batch --import
+          KEY_ID="$(gpg --batch --with-colons --list-secret-keys | awk -F: '$1=="fpr" {print $10; exit}')"
+
+          if [[ -z "$KEY_ID" ]]; then
+            echo "Unable to resolve an imported signing key fingerprint." >&2
+            exit 1
+          fi
+
+          echo "gnupghome=$GNUPGHOME" >> "$GITHUB_OUTPUT"
+          echo "key_id=$KEY_ID" >> "$GITHUB_OUTPUT"
+
+      - name: Build signed APT repository
+        env:
+          APT_GPG_KEY_ID: ${{ steps.gpg.outputs.key_id }}
+          APT_GPG_PASSPHRASE: ${{ secrets.APT_GPG_PASSPHRASE }}
+          GNUPGHOME: ${{ steps.gpg.outputs.gnupghome }}
+        run: |
+          set -euo pipefail
+          bash scripts/build-apt-repo.sh \
+            --sign \
+            --repository-url="${{ steps.repo_url.outputs.url }}"
+
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload GitHub Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: target/release-packaging/apt-repo
+
+      - name: Deploy GitHub Pages site
+        id: deployment
+        uses: actions/deploy-pages@v4

@@ -10,8 +10,8 @@ This document is a production-ready instruction pack for Codex to:
 ---
 
 ## Important release correction
-The repository now targets the canonical public release `0.1.7` with GitHub tag
-`v0.1.7`.
+The repository now targets the canonical public release `0.1.8` with GitHub tag
+`v0.1.8`.
 
 For this release, Codex must keep versioning, ownership metadata, documentation,
 and packaging aligned on the canonical AudioShare repository.
@@ -19,8 +19,8 @@ and packaging aligned on the canonical AudioShare repository.
 ### Versioning decision rule
 Use this release baseline:
 
-1. bump workspace version to `0.1.7`
-2. publish GitHub tag `v0.1.7`
+1. bump workspace version to `0.1.8`
+2. publish GitHub tag `v0.1.8`
 3. mark the release as a stable release only after validation passes
 
 Do not leave mismatched version or tag references behind.
@@ -133,8 +133,8 @@ Fix versioning so there is no mismatch between:
 - README release wording
 
 Use this decision rule:
-- align the workspace version, package metadata, About page, docs, and release assets on `0.1.7`
-- publish the matching GitHub tag `v0.1.7` only after validation passes
+- align the workspace version, package metadata, About page, docs, and release assets on `0.1.8`
+- publish the matching GitHub tag `v0.1.8` only after validation passes
 
 Never leave mixed version or tag references behind.
 
@@ -291,7 +291,7 @@ When you finish, provide:
 
 ## Final release naming rule
 Use this logic at the end:
-- if AppImage + `.deb` + Flatpak + checksums are all produced and validated, suggest `v0.1.7`
+- if AppImage + `.deb` + Flatpak + checksums are all produced and validated, suggest `v0.1.8`
 - otherwise stop and fix the blockers before tagging
 
 Now execute the work carefully and incrementally.
@@ -324,16 +324,16 @@ At the end, return the changed files, remaining blockers, a final tag suggestion
 ## Recommended next tag
 
 ### Canonical release target
-- **Tag:** `v0.1.7`
-- **Release title:** `SynchroSonic v0.1.7`
+- **Tag:** `v0.1.8`
+- **Release title:** `SynchroSonic v0.1.8`
 - **Release type:** Stable
 
 ---
 
-## Copy-paste GitHub release description for `v0.1.7`
+## Copy-paste GitHub release description for `v0.1.8`
 
 ```md
-## SynchroSonic v0.1.7
+## SynchroSonic v0.1.8
 
 This release aligns SynchroSonic metadata, packaging, and release automation on the canonical AudioShare repository.
 

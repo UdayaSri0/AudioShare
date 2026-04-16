@@ -7,7 +7,8 @@ APP_BINARY="synchrosonic-app"
 PACKAGE_ROOT="$ROOT/target/release-packaging"
 PACKAGE_SCRIPT="$ROOT/scripts/package-linux.sh"
 APPIMAGE_TOOL_URL="https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage"
-APPIMAGE_TOOL="$PACKAGE_ROOT/tools/appimagetool-x86_64.AppImage"
+TOOL_ROOT="$ROOT/target/tools"
+APPIMAGE_TOOL="$TOOL_ROOT/appimagetool-x86_64.AppImage"
 
 SKIP_BUILD=0
 for arg in "$@"; do
@@ -40,7 +41,7 @@ if [[ ! -d "$PACKAGE_ROOT/AppDir" ]]; then
     exit 1
 fi
 
-mkdir -p "$PACKAGE_ROOT/tools"
+mkdir -p "$TOOL_ROOT"
 if [[ ! -x "$APPIMAGE_TOOL" ]]; then
     curl -L -o "$APPIMAGE_TOOL" "$APPIMAGE_TOOL_URL"
     chmod +x "$APPIMAGE_TOOL"

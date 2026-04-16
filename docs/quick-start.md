@@ -65,8 +65,8 @@ Then start it directly:
 
 ## Option 3: Run From The Packaged Files Created By This Repo
 
-This repository can stage Linux packaging layouts, but it does not yet produce
-final signed installers automatically.
+This repository can stage Linux packaging layouts locally, and the tagged
+release flow can build AppImage, Debian, Flatpak, and tarball artifacts.
 
 Create the staging files:
 
@@ -80,6 +80,13 @@ If you want to open the binary from the staged native layout:
 mkdir -p /tmp/synchrosonic-native
 tar -xzf target/release-packaging/synchrosonic-*-linux-$(uname -m).tar.gz -C /tmp/synchrosonic-native
 /tmp/synchrosonic-native/usr/bin/synchrosonic-app
+```
+
+If you want the full release artifact set locally and have the packaging
+toolchain installed, run:
+
+```bash
+bash scripts/build-release-artifacts.sh --skip-build
 ```
 
 ## First Run Notes

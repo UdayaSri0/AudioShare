@@ -6,6 +6,8 @@ APP_BINARY="synchrosonic-app"
 PACKAGE_NAME="synchrosonic"
 PACKAGE_ROOT="$ROOT/target/release-packaging"
 PACKAGE_SCRIPT="$ROOT/scripts/package-linux.sh"
+SOURCE_CONTROL="$ROOT/debian/control"
+CHANGELOG_FILE="$ROOT/debian/changelog"
 
 SKIP_BUILD=0
 for arg in "$@"; do
@@ -45,51 +47,53 @@ fi
 
 DEB_ROOT="$PACKAGE_ROOT/deb"
 BINARY="$DEB_ROOT/usr/bin/$APP_BINARY"
+SUBSTVARS_DIR="$PACKAGE_ROOT/debian"
+SUBSTVARS_FILE="$SUBSTVARS_DIR/substvars"
+FILES_LIST_FILE="$SUBSTVARS_DIR/files"
+output="$PACKAGE_ROOT/${PACKAGE_NAME}_${version}_${deb_arch}.deb"
 
 if [[ ! -x "$BINARY" ]]; then
     printf 'release binary not found in staged Debian tree at %s\n' "$BINARY" >&2
     exit 1
 fi
 
-# Create symlink for dpkg-shlibdeps to find debian/control
-mkdir -p "$DEB_ROOT/debian"
-ln -sf "../DEBIAN/control" "$DEB_ROOT/debian/control"
-
-# Calculate dependencies
-cd "$DEB_ROOT"
-shlibs="$(dpkg-shlibdeps -O "./usr/bin/$APP_BINARY" | sed -n 's/^shlibs:Depends=//p')"
-misc="$(dpkg-shlibdeps -O "./usr/bin/$APP_BINARY" | sed -n 's/^misc:Depends=//p' || true)"
-cd "$ROOT"
-
-if [[ -n "$misc" ]]; then
-    deps="$shlibs, $misc"
-else
-    deps="$shlibs"
-fi
-
-if [[ -z "$deps" ]]; then
-    printf 'unable to calculate Debian dependencies for %s\n' "$BINARY" >&2
+if [[ ! -f "$SOURCE_CONTROL" ]]; then
+    printf 'expected Debian source control file at %s\n' "$SOURCE_CONTROL" >&2
     exit 1
 fi
 
-cat >"$DEB_ROOT/DEBIAN/control" <<EOF
-Package: $PACKAGE_NAME
-Version: $version
-Section: sound
-Priority: optional
-Architecture: $deb_arch
-Maintainer: UdayaSri0
-Homepage: https://github.com/UdayaSri0/AudioShare
-Depends: $deps
-Description: Linux-first LAN audio casting and receiver control
- SynchroSonic is a GTK4/libadwaita desktop application for Linux that captures
- system audio, discovers LAN receivers, streams to local-network targets, and
- provides diagnostics and local playback routing.
-EOF
+if [[ ! -f "$CHANGELOG_FILE" ]]; then
+    printf 'expected Debian changelog at %s\n' "$CHANGELOG_FILE" >&2
+    exit 1
+fi
 
-output="$PACKAGE_ROOT/${PACKAGE_NAME}_${version}_${deb_arch}.deb"
+mkdir -p "$DEB_ROOT/DEBIAN" "$SUBSTVARS_DIR"
+rm -f "$SUBSTVARS_FILE" "$FILES_LIST_FILE" "$DEB_ROOT/DEBIAN/control" "$ROOT/debian/files"
+
+dpkg-shlibdeps -T"$SUBSTVARS_FILE" "$BINARY"
+if ! grep -q '^misc:Depends=' "$SUBSTVARS_FILE"; then
+    printf 'misc:Depends=\n' >>"$SUBSTVARS_FILE"
+fi
+
+dpkg-gencontrol \
+    -p"$PACKAGE_NAME" \
+    -c"$SOURCE_CONTROL" \
+    -l"$CHANGELOG_FILE" \
+    -f"$FILES_LIST_FILE" \
+    -T"$SUBSTVARS_FILE" \
+    -P"$DEB_ROOT" \
+    -n"$(basename "$output")" \
+    -DArchitecture="$deb_arch" \
+    -v"$version" >/dev/null
+
+if [[ ! -f "$DEB_ROOT/DEBIAN/control" ]]; then
+    printf 'failed to generate binary package control file at %s\n' "$DEB_ROOT/DEBIAN/control" >&2
+    exit 1
+fi
+
 dpkg-deb --build "$DEB_ROOT" "$output"
 
 dpkg-deb --info "$output" >/dev/null 2>&1
+dpkg-deb --contents "$output" >/dev/null 2>&1
 
 printf 'Built Debian package: %s\n' "$output"

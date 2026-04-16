@@ -79,6 +79,9 @@ install -Dm755 "$APPRUN_FILE" "$appdir_root/AppRun"
 install -Dm644 "$DESKTOP_FILE" "$appdir_root/$APP_ID.desktop"
 install -Dm644 "$ICON_FILE" "$appdir_root/$APP_ID.svg"
 install -Dm644 "$ICON_FILE" "$appdir_root/.DirIcon"
+install -Dm644 \
+    "$METAINFO_FILE" \
+    "$appdir_root/usr/share/metainfo/$APP_ID.appdata.xml"
 
 mkdir -p "$deb_root/DEBIAN"
 cat >"$deb_root/DEBIAN/control" <<EOF
@@ -89,6 +92,7 @@ Priority: optional
 Architecture: $deb_arch
 Maintainer: UdayaSri0
 Homepage: https://github.com/UdayaSri0/AudioShare
+Depends: pipewire-bin
 Description: Linux-first LAN audio casting and receiver control
  SynchroSonic is a GTK4/libadwaita desktop application for Linux that captures
  system audio, discovers LAN receivers, streams to local-network targets, and
@@ -113,6 +117,6 @@ printf '  - %s\n' "$PACKAGE_ROOT/${artifact_prefix}.tar.gz"
 printf '  - %s\n' "$PACKAGE_ROOT/${artifact_prefix}-AppDir.tar.gz"
 printf '  - %s\n' "$PACKAGE_ROOT/${artifact_prefix}-deb-layout.tar.gz"
 printf '\n'
-printf 'Note: the AppDir and Debian layout are staging artifacts. Final AppImage generation,\n'
-printf 'Debian dependency metadata, signing, and repository publication are documented but\n'
-printf 'not fully automated in this repository yet.\n'
+printf 'Note: the AppDir and Debian layout are staging artifacts for inspection.\n'
+printf 'Final AppImage, Debian package, Flatpak bundle, and checksum generation live in\n'
+printf 'scripts/build-release-artifacts.sh. Signing and repository publication remain manual.\n'

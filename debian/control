@@ -1,0 +1,15 @@
+Source: synchrosonic
+Section: sound
+Priority: optional
+Maintainer: UdayaSri0
+Build-Depends: debhelper-compat (= 13), dpkg-dev
+Standards-Version: 4.6.2
+Rules-Requires-Root: no
+Homepage: https://github.com/UdayaSri0/AudioShare
+
+Package: synchrosonic
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}, pipewire-bin
+Description: Linux-first LAN audio streaming and casting application
+ SynchroSonic captures and streams Linux system audio to receivers over LAN
+ while optionally keeping local playback active on the sender.

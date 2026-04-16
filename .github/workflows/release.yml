@@ -28,7 +28,13 @@ jobs:
 
       - name: Validate tag/version consistency
         run: |
-          VERSION="$(python3 scripts/read-workspace-version.py)"
+          VERSION="$(python3 - <<'PY'
+from pathlib import Path
+import tomllib
+data = tomllib.loads(Path('Cargo.toml').read_text())
+print(data['workspace']['package']['version'])
+PY
+)"
           TAG="${GITHUB_REF#refs/tags/}"
           EXPECTED_TAG="v${VERSION}"
           echo "workspace version: ${VERSION}"

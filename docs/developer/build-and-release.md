@@ -76,6 +76,9 @@ This will also create:
 - `synchrosonic-<version>-linux-x86_64.tar.gz`
 - `SHA256SUMS.txt`
 
+If `flatpak` or `flatpak-builder` are not installed locally, the script skips
+the Flatpak bundle and still generates the remaining artifacts plus checksums.
+
 ## What The Packaging Script Does
 
 `scripts/package-linux.sh`:
@@ -83,9 +86,18 @@ This will also create:
 - reads the workspace version from the root `Cargo.toml` via `scripts/read-workspace-version.py`
 - builds `target/release/synchrosonic-app` unless `--skip-build` is passed
 - installs the binary plus desktop assets into staging layouts
-- generates a Debian-style `DEBIAN/control`
+- generates a staged Debian-style `DEBIAN/control`
 - validates desktop metadata when the validator tools are available
 - archives the staged layouts as tarballs
+
+`scripts/build-deb.sh`:
+
+- reads package metadata from `debian/control`
+- reads version metadata from `debian/changelog`
+- runs `dpkg-shlibdeps` against the staged release binary
+- writes substvars for shared-library dependencies
+- runs `dpkg-gencontrol` to generate the final `target/release-packaging/deb/DEBIAN/control`
+- builds the final `.deb` with `dpkg-deb --build`
 
 ## Debug Builds vs Release Builds
 
@@ -117,6 +129,9 @@ What is implemented today:
 What is not currently automated:
 
 - signing or repository publication
+
+The Flatpak artifact path is automated in tagged releases, but it still depends
+on the host/runtime exposing the PipeWire CLI tools the current backend uses.
 
 ## Relationship To GitHub Actions
 

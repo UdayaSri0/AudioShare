@@ -8,6 +8,7 @@ Use this checklist before publishing a Linux release of SynchroSonic.
 - Decide whether to expand the current short-form GPL notice to the full license text.
 - Confirm the root workspace version in `Cargo.toml` matches the tag to be published.
 - Confirm repository, issues, and releases links point to `https://github.com/UdayaSri0/AudioShare`.
+- Verify `debian/control` and `debian/changelog` match the intended release version.
 - Update [CHANGELOG.md](../CHANGELOG.md) for the release being tagged.
 - Review [README.md](../README.md) for version-specific wording.
 - Review [CONTRIBUTING.md](../CONTRIBUTING.md) and [SECURITY.md](../SECURITY.md).
@@ -34,6 +35,7 @@ Use this checklist before publishing a Linux release of SynchroSonic.
 - Inspect the native Linux staging layout in `target/release-packaging/native`.
 - Inspect the AppDir staging layout in `target/release-packaging/AppDir`.
 - Inspect the Debian staging layout in `target/release-packaging/deb`.
+- Verify the generated `.deb` metadata comes from Debian tooling rather than a staged control-file copy.
 - Decide whether this release will ship staging artifacts only or final package artifacts too.
 - If shipping a final AppImage, validate the selected toolchain and signing flow.
 - If shipping a final `.deb`, validate dependency metadata and install/remove behavior.

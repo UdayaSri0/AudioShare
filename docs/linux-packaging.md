@@ -1,8 +1,7 @@
 # Linux Packaging And Release Assets
 
-This document describes the Linux packaging work that now exists in the
-repository and the gaps that still need to be closed before a polished public
-release.
+This document describes the current Linux packaging state for SynchroSonic
+after the `0.1.8` release-engineering pass.
 
 ## What Exists In The Repo Now
 
@@ -12,17 +11,29 @@ Linux release metadata and packaging assets live here:
 - `packaging/linux/org.synchrosonic.SynchroSonic.metainfo.xml`
 - `packaging/linux/org.synchrosonic.SynchroSonic.svg`
 - `packaging/linux/AppRun`
+- `packaging/flatpak/org.synchrosonic.SynchroSonic.yml`
+- `debian/control`
+- `debian/changelog`
 - `scripts/package-linux.sh`
+- `scripts/build-appimage.sh`
+- `scripts/build-deb.sh`
+- `scripts/build-flatpak.sh`
+- `scripts/build-release-artifacts.sh`
 
-The packaging script stages three real filesystem layouts under
+The staging script writes three inspection-friendly filesystem layouts under
 `target/release-packaging/`:
 
 - native Linux install tree
-- AppDir layout for later AppImage generation
-- Debian-style filesystem tree with a generated `DEBIAN/control`
+- AppDir layout for AppImage generation
+- Debian filesystem tree with a staged `DEBIAN/control`
 
-It also archives those layouts as tarballs so CI can upload them as build
-artifacts.
+The tagged release flow builds the final artifact set:
+
+- `synchrosonic-<version>-x86_64.AppImage`
+- `synchrosonic_<version>_amd64.deb`
+- `synchrosonic-<version>.flatpak`
+- `synchrosonic-<version>-linux-x86_64.tar.gz`
+- `SHA256SUMS.txt`
 
 ## Build And Runtime Requirements
 
@@ -32,6 +43,12 @@ Build-time requirements:
 - `pkg-config`
 - `libgtk-4-dev`
 - `libadwaita-1-dev`
+- `desktop-file-utils`
+- `appstream`
+- `dpkg-dev`
+- `curl`
+- `flatpak`
+- `flatpak-builder`
 
 Runtime assumptions in the current implementation:
 
@@ -40,9 +57,9 @@ Runtime assumptions in the current implementation:
 - `pw-play`
 - a PipeWire session that exposes sources and playback sinks
 
-This means packaging is not just about GTK/libadwaita libraries. Linux users
-also need PipeWire command-line tools available at runtime because the current
-audio backend shells out to them directly.
+The Debian package metadata now includes `pipewire-bin` explicitly because the
+current backend shells out to PipeWire CLI tools instead of linking against a
+library API directly.
 
 ## Local Packaging Workflow
 
@@ -59,114 +76,90 @@ Or let the script perform the release build first:
 bash scripts/package-linux.sh
 ```
 
-The script writes outputs to `target/release-packaging/`.
+If you have the full release packaging toolchain installed and want the final
+artifact set locally, run:
 
-## Native Linux Build Plan
+```bash
+bash scripts/build-release-artifacts.sh --skip-build
+```
 
-Current status:
+If `flatpak` and `flatpak-builder` are missing locally, the script still builds
+the AppImage, Debian package, tarball, and checksums, then prints a warning
+that the Flatpak bundle was skipped. The tagged GitHub release workflow installs
+those tools before building release assets.
 
-- the repo can build `target/release/synchrosonic-app`
-- the packaging script stages a native install tree with:
-  - `usr/bin/synchrosonic-app`
-  - desktop entry
-  - AppStream metadata
-  - scalable icon
-  - README and LICENSE docs
+## Debian Packaging Flow
 
-This is enough for distro maintainers or contributors to inspect the install
-layout and adapt it to their preferred build system.
+The Debian path now distinguishes source metadata from binary package metadata
+correctly:
 
-## AppImage Plan
+- `debian/control` is the source-style Debian control file used by Debian tooling
+- `debian/changelog` carries the package version metadata used by `dpkg-gencontrol`
+- `target/release-packaging/deb/DEBIAN/control` is the final binary package
+  control file generated for the staged package root
+
+`scripts/build-deb.sh` now performs this sequence:
+
+1. stage the Debian filesystem tree
+2. run `dpkg-shlibdeps` against the built release binary
+3. write substvars for shared-library dependencies
+4. run `dpkg-gencontrol` with `debian/control` and `debian/changelog`
+5. generate the final `DEBIAN/control`
+6. build the package with `dpkg-deb --build`
+
+This fixes the previous failure where `dpkg-shlibdeps` tried to parse a binary
+`DEBIAN/control` file as if it were a source-style `debian/control`.
+
+## AppImage Status
 
 Current status:
 
 - the repo produces a valid AppDir-style directory
-- `AppRun`, desktop entry, icon, binary, and metadata are staged together
-- final AppImage generation is now automated through `scripts/build-appimage.sh`
+- `AppRun`, desktop entry, icon, binary, and AppStream metadata are staged together
+- final AppImage generation is automated through `scripts/build-appimage.sh`
 
 Remaining gap:
 
 - signing is not yet implemented for the `.AppImage`
-- the runtime still depends on host PipeWire tooling for the current audio backend
+- runtime still depends on host PipeWire tooling for the current audio backend
 
-The AppDir is now a real input to a final `synchrosonic-<version>-x86_64.AppImage`
-build, rather than only a staging artifact.
-
-## Debian Package Plan
+## Flatpak Status
 
 Current status:
 
-- the repo stages a Debian-style filesystem tree
-- a basic `DEBIAN/control` file is generated during packaging
-
-Remaining gap:
-
-- signing and repository publication are not implemented yet
-- CI now builds a real `.deb`, but install-time validation of host dependency
-  coverage should continue to be reviewed
-
-This repository now builds a final Debian package with `dpkg-deb --build`, using
-`dpkg-shlibdeps` to infer runtime dependencies from the release binary.
-
-## Flatpak Plan
-
-Current status:
-
-- a Flatpak manifest is now version controlled at
-  `packaging/flatpak/org.synchrosonic.SynchroSonic.yml`
-- the repository includes `scripts/build-flatpak.sh` to build a local Flatpak
-  repository and export a `.flatpak` bundle
+- the Flatpak manifest is version controlled
+- `scripts/build-flatpak.sh` builds a local Flatpak repository and exported bundle
+- tagged release automation installs Flatpak and Flatpak Builder before building
 
 Remaining gap:
 
 - the current audio backend depends on PipeWire command-line tools that are
   still a host-integration detail for a Flatpak sandbox
-- runtime behavior should be validated on a target host because access to
-  `pw-dump`, `pw-record`, and `pw-play` is not guaranteed inside every runtime
-  environment
+- runtime validation should continue on target hosts because access to
+  `pw-dump`, `pw-record`, and `pw-play` is runtime/environment dependent
 
-Flatpak support is treated as a preview artifact path for desktop users and
-for downstream packaging experimentation, with host runtime permissions
-clearly documented.
+Flatpak support should therefore be described as an automated preview artifact
+path, not as a fully sandbox-independent runtime guarantee.
 
 ## CI Packaging Scope
 
-The GitHub Actions workflow does the following on Ubuntu:
+The pull request / push workflow stages packaging layouts after passing Rust
+format, lint, and test checks.
 
-- `cargo fmt --all --check`
-- `cargo clippy --workspace --all-targets -- -D warnings`
-- `cargo test --workspace`
-- `cargo build --release -p synchrosonic-app`
-- `bash scripts/package-linux.sh --skip-build`
+The tagged release workflow validates version/tag consistency and then builds:
 
-A new tag-triggered release workflow additionally builds and publishes:
-
-- final `synchrosonic-<version>-x86_64.AppImage`
-- `synchrosonic_<version>_amd64.deb`
-- `synchrosonic-<version>.flatpak`
-- `synchrosonic-<version>-linux-x86_64.tar.gz`
-- `SHA256SUMS.txt`
-
-The staging workflow remains useful for layout inspection, while the release
-workflow produces the final installable artifacts.
+- AppImage
+- Debian `.deb`
+- Flatpak bundle
+- portable tarball
+- checksum manifest
 
 ## Remaining Release Gaps
 
-The main blockers before calling packaging fully release-ready are:
+The main blockers before calling packaging fully polished are:
 
-- final AppImage generation and signing are not automated yet
-- final Debian dependency metadata is not generated yet
-- the root `LICENSE` file is present, but it is still a short-form notice rather
-  than the full GPL text some distributors expect
-- no screenshot assets are included in the repository yet
-- runtime packaging still assumes the host system provides PipeWire command-line
-  tools
-
-## Suggested Next Packaging Iteration
-
-- choose and pin one AppImage toolchain
-- decide whether Debian packaging lives in `debian/` or remains script-driven
-- add dependency verification for GTK/libadwaita/PipeWire runtime pieces
-- replace the short-form license notice with the full GPL text if distro
-  distribution is a target
-- add real screenshots once the UI is stable enough for release pages
+- signing is not yet implemented for AppImage or Debian releases
+- repository publication is not automated
+- Flatpak runtime behavior still depends on host access to PipeWire CLI tools
+- the root `LICENSE` file is a short-form GPL notice rather than the full text
+- release pages still need real screenshots

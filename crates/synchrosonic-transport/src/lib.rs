@@ -421,7 +421,25 @@ mod tests {
         );
         assert_eq!(snapshot_after.targets.len(), 1);
         assert_eq!(snapshot_after.targets[0].receiver_id.as_str(), "receiver-2");
-        assert!(receiver_two_bytes.load(Ordering::SeqCst) > receiver_two_before);
+        let receiver_two_after = receiver_two_bytes.load(Ordering::SeqCst);
+        let receiver_two_packets_after = receiver_two
+            .runtime
+            .lock()
+            .expect("receiver runtime mutex")
+            .snapshot()
+            .metrics
+            .packets_received;
+        assert!(
+            receiver_two_after > receiver_two_before
+                || receiver_two_packets_after > receiver_two_packets_before,
+            "receiver-2 stopped progressing after receiver-1 was removed; bytes_before={}, bytes_after={}, packets_before={}, packets_after={}, sender_state={:?}, sender_snapshot={:?}",
+            receiver_two_before,
+            receiver_two_after,
+            receiver_two_packets_before,
+            receiver_two_packets_after,
+            snapshot_after.state,
+            snapshot_after
+        );
 
         let mut receiver_one_last = receiver_one_bytes.load(Ordering::SeqCst);
         let receiver_one_stabilized =

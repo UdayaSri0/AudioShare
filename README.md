@@ -13,12 +13,14 @@ choice, and first-pass Linux release metadata and packaging layouts.
 Current release posture:
 
 - Canonical repository: `https://github.com/UdayaSri0/AudioShare`
-- Current release/tag target: `0.1.7` / `v0.1.7`
+- Current release/tag target: `0.1.8` / `v0.1.8`
 - Developer / Maintainer: `UdayaSri0`
 - Native Linux release builds are supported.
-- The repository stages real native install, AppDir, and Debian filesystem layouts.
-- New release tooling now produces final `.AppImage`, `.deb`, and Flatpak `.flatpak` bundle artifacts on tagged builds.
-- Signing and public security reporting remain future work for a stable release.
+- The repository stages native install, AppDir, and Debian filesystem layouts for inspection and local validation.
+- Tagged release automation builds an AppImage, Debian `.deb`, Flatpak `.flatpak`, portable tarball, and `SHA256SUMS.txt`.
+- The Debian package path now uses a real source-style `debian/control` and `debian/changelog` flow before generating the package-local `DEBIAN/control`.
+- Flatpak artifacts are automated in tagged releases, but runtime behavior remains a preview path because the current backend depends on host PipeWire CLI tools.
+- Signing and repository publication remain manual release tasks.
 
 ## Goals
 
@@ -34,7 +36,7 @@ Current release posture:
 ## Non-Goals For The Current Phase
 
 - No Bluetooth transport or pairing support yet.
-- No final signed AppImage or dependency-complete `.deb` installer yet.
+- No signed AppImage, Debian repository publication, or signed Flatpak release flow yet.
 - No Windows or macOS audio backend yet.
 
 ## Repository Layout
@@ -110,8 +112,8 @@ The packaging scripts now produce:
 
 - native Linux install layout tarball
 - final `synchrosonic-<version>-x86_64.AppImage`
-- real `synchrosonic_<version>_amd64.deb`
-- Flatpak bundle `synchrosonic-<version>.flatpak`
+- real `synchrosonic_<version>_amd64.deb` with dependency metadata generated from Debian tooling
+- Flatpak bundle `synchrosonic-<version>.flatpak` for preview/runtime validation
 - portable tarball `synchrosonic-<version>-linux-x86_64.tar.gz`
 - checksum manifest `SHA256SUMS.txt`
 
@@ -119,7 +121,7 @@ Final packaging artifacts are built by `scripts/build-release-artifacts.sh` and
 published on tag-triggered GitHub releases. The staging scripts remain useful
 for local inspection and layout validation.
 
-The current release line is `v0.1.7`, with source, issues, and release pages
+The current release line is `v0.1.8`, with source, issues, and release pages
 hosted at the canonical AudioShare repository.
 
 ## Community

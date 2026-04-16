@@ -63,11 +63,11 @@ pub struct StreamBranchBufferSnapshot {
 
 impl StreamBranchBufferSnapshot {
     pub fn fill_percent(&self) -> u8 {
-        if self.max_packets == 0 {
-            return 0;
-        }
-
-        ((self.queued_packets.saturating_mul(100)) / self.max_packets).min(100) as u8
+        self.queued_packets
+            .saturating_mul(100)
+            .checked_div(self.max_packets)
+            .map(|percent| percent.min(100) as u8)
+            .unwrap_or(0)
     }
 }
 
@@ -262,5 +262,37 @@ mod tests {
         assert_eq!(aggregate.packets_sent, 8);
         assert_eq!(aggregate.bytes_sent, 100);
         assert_eq!(aggregate.latency_estimate_ms, Some(20));
+    }
+
+    #[test]
+    fn branch_buffer_fill_percent_reports_normal_fill() {
+        let snapshot = StreamBranchBufferSnapshot {
+            queued_packets: 3,
+            max_packets: 4,
+            ..StreamBranchBufferSnapshot::default()
+        };
+
+        assert_eq!(snapshot.fill_percent(), 75);
+    }
+
+    #[test]
+    fn branch_buffer_fill_percent_caps_at_one_hundred() {
+        let snapshot = StreamBranchBufferSnapshot {
+            queued_packets: 8,
+            max_packets: 4,
+            ..StreamBranchBufferSnapshot::default()
+        };
+
+        assert_eq!(snapshot.fill_percent(), 100);
+    }
+
+    #[test]
+    fn branch_buffer_fill_percent_returns_zero_without_capacity() {
+        let snapshot = StreamBranchBufferSnapshot {
+            queued_packets: 8,
+            ..StreamBranchBufferSnapshot::default()
+        };
+
+        assert_eq!(snapshot.fill_percent(), 0);
     }
 }

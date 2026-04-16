@@ -193,14 +193,16 @@ pub struct ReceiverBufferSnapshot {
 
 impl ReceiverBufferSnapshot {
     pub fn fill_percent(&self) -> u8 {
-        if self.max_buffer_ms > 0 {
-            return ((self.queued_audio_ms.saturating_mul(100)) / self.max_buffer_ms).min(100)
-                as u8;
-        }
-        if self.max_packets > 0 {
-            return ((self.queued_packets.saturating_mul(100)) / self.max_packets).min(100) as u8;
-        }
-        0
+        self.queued_audio_ms
+            .saturating_mul(100)
+            .checked_div(self.max_buffer_ms)
+            .or_else(|| {
+                self.queued_packets
+                    .saturating_mul(100)
+                    .checked_div(self.max_packets)
+            })
+            .map(|percent| percent.min(100) as u8)
+            .unwrap_or(0)
     }
 }
 
@@ -359,5 +361,51 @@ mod tests {
         assert!(snapshot.sync.expected_output_latency_ms > 0);
         assert!(snapshot.buffer.target_buffer_ms > 0);
         assert!(snapshot.buffer.max_buffer_ms >= snapshot.buffer.target_buffer_ms);
+    }
+
+    #[test]
+    fn buffer_fill_percent_uses_audio_buffer_when_available() {
+        let snapshot = ReceiverBufferSnapshot {
+            queued_audio_ms: 42,
+            max_buffer_ms: 84,
+            queued_packets: 1,
+            max_packets: 1,
+            ..ReceiverBufferSnapshot::default()
+        };
+
+        assert_eq!(snapshot.fill_percent(), 50);
+    }
+
+    #[test]
+    fn buffer_fill_percent_falls_back_to_packets_when_audio_denominator_is_zero() {
+        let snapshot = ReceiverBufferSnapshot {
+            queued_packets: 3,
+            max_packets: 4,
+            ..ReceiverBufferSnapshot::default()
+        };
+
+        assert_eq!(snapshot.fill_percent(), 75);
+    }
+
+    #[test]
+    fn buffer_fill_percent_caps_at_one_hundred() {
+        let snapshot = ReceiverBufferSnapshot {
+            queued_audio_ms: 350,
+            max_buffer_ms: 200,
+            ..ReceiverBufferSnapshot::default()
+        };
+
+        assert_eq!(snapshot.fill_percent(), 100);
+    }
+
+    #[test]
+    fn buffer_fill_percent_returns_zero_when_no_denominators_exist() {
+        let snapshot = ReceiverBufferSnapshot {
+            queued_audio_ms: 25,
+            queued_packets: 10,
+            ..ReceiverBufferSnapshot::default()
+        };
+
+        assert_eq!(snapshot.fill_percent(), 0);
     }
 }

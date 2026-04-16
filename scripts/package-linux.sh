@@ -7,6 +7,7 @@ APP_NAME="SynchroSonic"
 APP_BINARY="synchrosonic-app"
 PACKAGE_NAME="synchrosonic"
 PACKAGE_ROOT="$ROOT/target/release-packaging"
+STAGING_ROOT="$PACKAGE_ROOT/staging"
 RELEASE_BINARY="$ROOT/target/release/$APP_BINARY"
 DESKTOP_FILE="$ROOT/packaging/linux/$APP_ID.desktop"
 METAINFO_FILE="$ROOT/packaging/linux/$APP_ID.metainfo.xml"
@@ -54,7 +55,7 @@ if [[ ! -x "$RELEASE_BINARY" ]]; then
 fi
 
 rm -rf "$PACKAGE_ROOT"
-mkdir -p "$PACKAGE_ROOT"
+mkdir -p "$PACKAGE_ROOT" "$STAGING_ROOT"
 
 stage_usr_layout() {
     local root="$1"
@@ -109,13 +110,13 @@ fi
 
 artifact_prefix="synchrosonic-${version}-linux-${arch}"
 tar -C "$native_root" -czf "$PACKAGE_ROOT/${artifact_prefix}.tar.gz" .
-tar -C "$PACKAGE_ROOT" -czf "$PACKAGE_ROOT/${artifact_prefix}-AppDir.tar.gz" AppDir
-tar -C "$deb_root" -czf "$PACKAGE_ROOT/${artifact_prefix}-deb-layout.tar.gz" .
+tar -C "$PACKAGE_ROOT" -czf "$STAGING_ROOT/${artifact_prefix}-AppDir.tar.gz" AppDir
+tar -C "$deb_root" -czf "$STAGING_ROOT/${artifact_prefix}-deb-layout.tar.gz" .
 
 printf 'Created packaging outputs in %s\n' "$PACKAGE_ROOT"
 printf '  - %s\n' "$PACKAGE_ROOT/${artifact_prefix}.tar.gz"
-printf '  - %s\n' "$PACKAGE_ROOT/${artifact_prefix}-AppDir.tar.gz"
-printf '  - %s\n' "$PACKAGE_ROOT/${artifact_prefix}-deb-layout.tar.gz"
+printf '  - %s\n' "$STAGING_ROOT/${artifact_prefix}-AppDir.tar.gz"
+printf '  - %s\n' "$STAGING_ROOT/${artifact_prefix}-deb-layout.tar.gz"
 printf '\n'
 printf 'Note: the AppDir and Debian layout are staging artifacts for inspection.\n'
 printf 'Final AppImage, Debian package, Flatpak bundle, and checksum generation live in\n'

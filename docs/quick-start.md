@@ -66,7 +66,8 @@ Then start it directly:
 ## Option 3: Run From The Packaged Files Created By This Repo
 
 This repository can stage Linux packaging layouts locally, and the tagged
-release flow can build AppImage, Debian, Flatpak, and tarball artifacts.
+release flow can build AppImage, Debian, Flatpak, tarball, and checksum
+artifacts.
 
 Create the staging files:
 
@@ -82,12 +83,14 @@ tar -xzf target/release-packaging/synchrosonic-*-linux-$(uname -m).tar.gz -C /tm
 /tmp/synchrosonic-native/usr/bin/synchrosonic-app
 ```
 
-If you want the full release artifact set locally and have the packaging
-toolchain installed, run:
+If you want the full release artifact set locally, run:
 
 ```bash
 bash scripts/build-release-artifacts.sh --skip-build
 ```
+
+That script uses native Flatpak tooling when available and otherwise falls back
+to the repository's Docker-based Flatpak builder.
 
 ## First Run Notes
 

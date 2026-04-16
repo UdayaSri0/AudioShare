@@ -363,7 +363,7 @@ CI requirements:
 **Do NOT use `pip --break-system-packages` in postinst.**
 
 MVP packaging choice (pick one):
-A) Ship the canonical stable release as v0.1.8 with aligned docs, metadata, and packaging
+A) Ship the canonical stable release as v0.1.9 with aligned docs, metadata, and packaging
 B) Proper `.deb`:
    - venv under `/opt/synchrosonic/venv`
    - build-time vendoring; postinst only wires desktop entry/services

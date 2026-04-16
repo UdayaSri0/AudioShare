@@ -29,6 +29,7 @@ Use this checklist before publishing a Linux release of SynchroSonic.
 - Run `cargo test --workspace`.
 - Run `cargo build --release -p synchrosonic-app`.
 - Run `bash scripts/build-release-artifacts.sh --skip-build`.
+- Run `bash scripts/verify-release-artifacts.sh`.
 
 ## Packaging Review
 
@@ -36,9 +37,10 @@ Use this checklist before publishing a Linux release of SynchroSonic.
 - Inspect the AppDir staging layout in `target/release-packaging/AppDir`.
 - Inspect the Debian staging layout in `target/release-packaging/deb`.
 - Verify the generated `.deb` metadata comes from Debian tooling rather than a staged control-file copy.
-- Decide whether this release will ship staging artifacts only or final package artifacts too.
+- Verify the release asset directory contains final `.AppImage`, `.deb`, `.flatpak`, portable tarball, and `SHA256SUMS.txt`.
 - If shipping a final AppImage, validate the selected toolchain and signing flow.
 - If shipping a final `.deb`, validate dependency metadata and install/remove behavior.
+- If shipping APT metadata, confirm the scaffold is clearly described as unsigned unless signing was completed.
 
 ## Documentation
 

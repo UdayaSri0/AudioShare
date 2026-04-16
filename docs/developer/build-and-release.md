@@ -38,8 +38,8 @@ The packaging script creates tarballs in `target/release-packaging/` with names
 like:
 
 - `synchrosonic-<version>-linux-<arch>.tar.gz`
-- `synchrosonic-<version>-linux-<arch>-AppDir.tar.gz`
-- `synchrosonic-<version>-linux-<arch>-deb-layout.tar.gz`
+- `staging/synchrosonic-<version>-linux-<arch>-AppDir.tar.gz`
+- `staging/synchrosonic-<version>-linux-<arch>-deb-layout.tar.gz`
 
 ## Linux Packaging Workflow
 
@@ -75,9 +75,11 @@ This will also create:
 - `synchrosonic-<version>.flatpak`
 - `synchrosonic-<version>-linux-x86_64.tar.gz`
 - `SHA256SUMS.txt`
+- `apt-repo/` unsigned repository scaffold
 
-If `flatpak` or `flatpak-builder` are not installed locally, the script skips
-the Flatpak bundle and still generates the remaining artifacts plus checksums.
+If `flatpak` or `flatpak-builder` are not installed locally, the script falls
+back to a Docker-based Flatpak builder image. If neither native tooling nor
+Docker is available, the release build fails before verification.
 
 ## What The Packaging Script Does
 
@@ -98,6 +100,13 @@ the Flatpak bundle and still generates the remaining artifacts plus checksums.
 - writes substvars for shared-library dependencies
 - runs `dpkg-gencontrol` to generate the final `target/release-packaging/deb/DEBIAN/control`
 - builds the final `.deb` with `dpkg-deb --build`
+
+`scripts/verify-release-artifacts.sh`:
+
+- lists the final release packaging directory
+- requires at least one `.AppImage`, `.deb`, `.flatpak`, portable `.tar.gz`,
+  and `SHA256SUMS.txt`
+- is used before GitHub release publication
 
 ## Debug Builds vs Release Builds
 
@@ -129,9 +138,11 @@ What is implemented today:
 What is not currently automated:
 
 - signing or repository publication
+- signed APT repository hosting
 
-The Flatpak artifact path is automated in tagged releases, but it still depends
-on the host/runtime exposing the PipeWire CLI tools the current backend uses.
+The Flatpak artifact path is automated in tagged releases and local Docker
+fallback builds, but it still depends on the host/runtime exposing the PipeWire
+CLI tools the current backend uses.
 
 ## Relationship To GitHub Actions
 

@@ -1,7 +1,7 @@
 # Linux Packaging And Release Assets
 
 This document describes the current Linux packaging state for SynchroSonic
-after the `0.1.8` release-engineering pass.
+after the `0.1.9` release-engineering pass.
 
 ## What Exists In The Repo Now
 
@@ -19,6 +19,8 @@ Linux release metadata and packaging assets live here:
 - `scripts/build-deb.sh`
 - `scripts/build-flatpak.sh`
 - `scripts/build-release-artifacts.sh`
+- `scripts/verify-release-artifacts.sh`
+- `scripts/build-apt-repo.sh`
 
 The staging script writes three inspection-friendly filesystem layouts under
 `target/release-packaging/`:
@@ -49,6 +51,7 @@ Build-time requirements:
 - `curl`
 - `flatpak`
 - `flatpak-builder`
+- `docker` as an optional local Flatpak fallback when host Flatpak tooling is unavailable
 
 Runtime assumptions in the current implementation:
 
@@ -83,10 +86,10 @@ artifact set locally, run:
 bash scripts/build-release-artifacts.sh --skip-build
 ```
 
-If `flatpak` and `flatpak-builder` are missing locally, the script still builds
-the AppImage, Debian package, tarball, and checksums, then prints a warning
-that the Flatpak bundle was skipped. The tagged GitHub release workflow installs
-those tools before building release assets.
+The release script now expects a final Flatpak bundle as part of the artifact
+set. If native `flatpak` and `flatpak-builder` are missing locally, the script
+falls back to a Docker-based Flatpak builder image. If neither native tooling
+nor Docker is available, the release build fails before checksums or publishing.
 
 ## Debian Packaging Flow
 
@@ -129,7 +132,8 @@ Current status:
 
 - the Flatpak manifest is version controlled
 - `scripts/build-flatpak.sh` builds a local Flatpak repository and exported bundle
-- tagged release automation installs Flatpak and Flatpak Builder before building
+- native Flatpak builds are supported in CI and on developer hosts with Flatpak tooling
+- local release builds can fall back to a Docker-based Flatpak builder image when host tooling is missing
 
 Remaining gap:
 
@@ -140,6 +144,29 @@ Remaining gap:
 
 Flatpak support should therefore be described as an automated preview artifact
 path, not as a fully sandbox-independent runtime guarantee.
+
+## APT Repository Scaffold
+
+The repo now includes an unsigned APT repository scaffold generator:
+
+- `scripts/build-apt-repo.sh`
+
+After `scripts/build-release-artifacts.sh` finishes, the scaffold lives under:
+
+- `target/release-packaging/apt-repo/`
+
+It currently generates:
+
+- `pool/` with the built `.deb`
+- `dists/stable/main/binary-<arch>/Packages`
+- `dists/stable/main/binary-<arch>/Packages.gz`
+- `dists/stable/Release`
+
+What it does not do yet:
+
+- sign `Release` or `InRelease`
+- publish to GitHub Pages or another APT host automatically
+- provide repository key management
 
 ## CI Packaging Scope
 
@@ -153,13 +180,14 @@ The tagged release workflow validates version/tag consistency and then builds:
 - Flatpak bundle
 - portable tarball
 - checksum manifest
+- verifies that the required artifacts exist before publishing the GitHub release
 
 ## Remaining Release Gaps
 
 The main blockers before calling packaging fully polished are:
 
 - signing is not yet implemented for AppImage or Debian releases
-- repository publication is not automated
+- APT publication is scaffolded but not automated or signed yet
 - Flatpak runtime behavior still depends on host access to PipeWire CLI tools
 - the root `LICENSE` file is a short-form GPL notice rather than the full text
 - release pages still need real screenshots

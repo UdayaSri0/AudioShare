@@ -19,7 +19,7 @@ jobs:
       - name: Install Linux build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y pkg-config libgtk-4-dev libadwaita-1-dev desktop-file-utils appstream dpkg-dev flatpak flatpak-builder curl libfuse2
+          sudo apt-get install -y pkg-config libgtk-4-dev libadwaita-1-dev desktop-file-utils appstream dbus-user-session dpkg-dev flatpak flatpak-builder curl libfuse2
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -58,6 +58,9 @@ PY
 
       - name: Build release artifacts
         run: bash scripts/build-release-artifacts.sh --skip-build
+
+      - name: Verify release artifacts
+        run: bash scripts/verify-release-artifacts.sh
 
       - name: Publish release assets
         uses: softprops/action-gh-release@v1

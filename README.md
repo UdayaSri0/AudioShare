@@ -13,14 +13,14 @@ choice, and first-pass Linux release metadata and packaging layouts.
 Current release posture:
 
 - Canonical repository: `https://github.com/UdayaSri0/AudioShare`
-- Current release/tag target: `0.1.8` / `v0.1.8`
+- Current release/tag target: `0.1.9` / `v0.1.9`
 - Developer / Maintainer: `UdayaSri0`
 - Native Linux release builds are supported.
 - The repository stages native install, AppDir, and Debian filesystem layouts for inspection and local validation.
-- Tagged release automation builds an AppImage, Debian `.deb`, Flatpak `.flatpak`, portable tarball, and `SHA256SUMS.txt`.
+- Tagged release automation verifies and publishes an AppImage, Debian `.deb`, Flatpak `.flatpak`, portable tarball, and `SHA256SUMS.txt`.
 - The Debian package path now uses a real source-style `debian/control` and `debian/changelog` flow before generating the package-local `DEBIAN/control`.
-- Flatpak artifacts are automated in tagged releases, but runtime behavior remains a preview path because the current backend depends on host PipeWire CLI tools.
-- Signing and repository publication remain manual release tasks.
+- Flatpak bundles can now be built locally with native Flatpak tooling or the repository's Docker-based fallback, but runtime behavior remains a preview path because the current backend depends on host PipeWire CLI tools.
+- The repo can also generate an unsigned APT repository scaffold locally; signing and publication remain manual release tasks.
 
 ## Goals
 
@@ -36,7 +36,7 @@ Current release posture:
 ## Non-Goals For The Current Phase
 
 - No Bluetooth transport or pairing support yet.
-- No signed AppImage, Debian repository publication, or signed Flatpak release flow yet.
+- No signed AppImage, signed Debian repository publication, or signed Flatpak release flow yet.
 - No Windows or macOS audio backend yet.
 
 ## Repository Layout
@@ -56,6 +56,7 @@ Current release posture:
 - `docs/roadmap.md`: phase-by-phase implementation roadmap.
 - `docs/configuration.md`: config schema, persistence, logging, and recovery.
 - `docs/linux-packaging.md`: current Linux packaging assets and remaining gaps.
+- `docs/apt-repository.md`: unsigned APT repository scaffold notes and follow-up scope.
 - `docs/release-checklist.md`: pre-release and publication checklist.
 - `docs/adr/`: architecture decision records.
 
@@ -91,6 +92,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo build --workspace
 cargo build --release -p synchrosonic-app
 bash scripts/package-linux.sh
+bash scripts/verify-release-artifacts.sh
 RUST_LOG=debug cargo run -p synchrosonic-app
 RUST_LOG=synchrosonic_audio=debug cargo run -p synchrosonic-audio --example capture_probe
 RUST_LOG=synchrosonic_discovery=debug cargo run -p synchrosonic-discovery --example discovery_probe
@@ -116,12 +118,17 @@ The packaging scripts now produce:
 - Flatpak bundle `synchrosonic-<version>.flatpak` for preview/runtime validation
 - portable tarball `synchrosonic-<version>-linux-x86_64.tar.gz`
 - checksum manifest `SHA256SUMS.txt`
+- unsigned APT repository scaffold under `target/release-packaging/apt-repo/`
 
-Final packaging artifacts are built by `scripts/build-release-artifacts.sh` and
-published on tag-triggered GitHub releases. The staging scripts remain useful
-for local inspection and layout validation.
+Final packaging artifacts are built by `scripts/build-release-artifacts.sh`,
+verified by `scripts/verify-release-artifacts.sh`, and published on
+tag-triggered GitHub releases. The staging scripts remain useful for local
+inspection and layout validation.
 
-The current release line is `v0.1.8`, with source, issues, and release pages
+If native Flatpak tooling is unavailable on your machine, the release build
+falls back to a Docker-based Flatpak builder image.
+
+The current release line is `v0.1.9`, with source, issues, and release pages
 hosted at the canonical AudioShare repository.
 
 ## Community

@@ -41,19 +41,20 @@ cp "$appimage_artifact" "$cached_appimage"
 
 bash "$ROOT/scripts/build-deb.sh" --skip-build
 cp "$cached_appimage" "$appimage_artifact"
+bash "$ROOT/scripts/build-flatpak.sh"
+
+if command -v dpkg-scanpackages >/dev/null 2>&1; then
+    bash "$ROOT/scripts/build-apt-repo.sh"
+else
+    printf 'dpkg-scanpackages not found; skipping the unsigned APT repository scaffold.\n'
+fi
 
 artifacts=(
     "$appimage_artifact"
     "$PACKAGE_ROOT/synchrosonic_${version}_amd64.deb"
+    "$PACKAGE_ROOT/synchrosonic-${version}.flatpak"
     "$PACKAGE_ROOT/synchrosonic-${version}-linux-${arch}.tar.gz"
 )
-
-if command -v flatpak >/dev/null 2>&1 && command -v flatpak-builder >/dev/null 2>&1; then
-    bash "$ROOT/scripts/build-flatpak.sh"
-    artifacts+=("$PACKAGE_ROOT/synchrosonic-${version}.flatpak")
-else
-    printf 'Flatpak tooling not found; skipping local Flatpak bundle generation.\n'
-fi
 
 for artifact in "${artifacts[@]}"; do
     if [[ ! -f "$artifact" ]]; then
@@ -64,5 +65,7 @@ done
 
 cd "$PACKAGE_ROOT"
 sha256sum "${artifacts[@]}" > SHA256SUMS.txt
+
+bash "$ROOT/scripts/verify-release-artifacts.sh"
 
 printf 'Generated checksum manifest: %s/SHA256SUMS.txt\n' "$PACKAGE_ROOT"

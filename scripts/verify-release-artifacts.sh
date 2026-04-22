@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 PACKAGE_ROOT="$ROOT/target/release-packaging"
 REQUIRE_RPM=0
+SKIP_FLATPAK="${SKIP_FLATPAK:-0}"
 
 for arg in "$@"; do
     case "$arg" in
@@ -46,7 +47,7 @@ if [[ "${#debs[@]}" -eq 0 ]]; then
     missing=1
 fi
 
-if [[ "${#flatpaks[@]}" -eq 0 ]]; then
+if [[ "$SKIP_FLATPAK" != "1" && "${#flatpaks[@]}" -eq 0 ]]; then
     printf 'missing Flatpak bundle artifact in %s\n' "$PACKAGE_ROOT" >&2
     missing=1
 fi
@@ -77,6 +78,10 @@ fi
 
 if [[ "$REQUIRE_RPM" -eq 1 ]]; then
     printf 'RPM verification enabled; found %s RPM artifact(s).\n' "${#rpms[@]}"
+fi
+
+if [[ "$SKIP_FLATPAK" == "1" ]]; then
+    printf 'Flatpak verification skipped because SKIP_FLATPAK=1.\n'
 fi
 
 printf 'Release artifact verification passed.\n'

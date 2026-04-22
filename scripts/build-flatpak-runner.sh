@@ -10,7 +10,7 @@ RUNTIME_REPO="https://flathub.org/repo/flathub.flatpakrepo"
 APP_ID="org.synchrosonic.SynchroSonic"
 APP_BRANCH="${SYNCHROSONIC_FLATPAK_BRANCH:-stable}"
 RUNTIME_VERSION="24.08"
-FLATPAK_ARCH="${SYNCHROSONIC_FLATPAK_ARCH:-x86_64}"
+SKIP_DEP_INSTALL="${SYNCHROSONIC_FLATPAK_SKIP_DEP_INSTALL:-0}"
 
 die() {
     printf '%s\n' "$1" >&2
@@ -64,14 +64,23 @@ run_with_session_bus() {
     fi
 }
 
-note "Ensuring Flatpak runtime and SDK from Flathub."
-run_with_session_bus bash -lc "
-    set -euo pipefail
-    flatpak remote-add --user --if-not-exists flathub '$RUNTIME_REPO'
-    flatpak install --user --noninteractive -y flathub 'org.freedesktop.Platform/$FLATPAK_ARCH/$RUNTIME_VERSION' 'org.freedesktop.Sdk/$FLATPAK_ARCH/$RUNTIME_VERSION'
-    flatpak-builder --force-clean --install-deps-from=flathub --repo='$REPO_DIR' '$BUILD_DIR' '$MANIFEST'
-    flatpak build-bundle '$REPO_DIR' '$BUNDLE' '$APP_ID' '$APP_BRANCH' --runtime-repo='$RUNTIME_REPO'
-"
+if [[ "$SKIP_DEP_INSTALL" == "1" ]]; then
+    # The release script preinstalls the Flathub remote and runtimes in system
+    # scope on CI so flatpak-builder and the runner resolve dependencies from
+    # the same installation. Skip the user-scope setup here in that case.
+    note "Skipping Flatpak remote and dependency installation because the caller preinstalled them."
+    run_with_session_bus flatpak-builder --force-clean --install-deps-from=flathub --repo="$REPO_DIR" "$BUILD_DIR" "$MANIFEST"
+    flatpak build-bundle "$REPO_DIR" "$BUNDLE" "$APP_ID" "$APP_BRANCH" --runtime-repo="$RUNTIME_REPO"
+else
+    note "Ensuring Flatpak runtime and SDK from Flathub."
+    run_with_session_bus bash -lc "
+        set -euo pipefail
+        flatpak remote-add --user --if-not-exists flathub '$RUNTIME_REPO'
+        flatpak install --user --noninteractive -y flathub 'org.freedesktop.Platform//$RUNTIME_VERSION' 'org.freedesktop.Sdk//$RUNTIME_VERSION'
+        flatpak-builder --force-clean --install-deps-from=flathub --repo='$REPO_DIR' '$BUILD_DIR' '$MANIFEST'
+        flatpak build-bundle '$REPO_DIR' '$BUNDLE' '$APP_ID' '$APP_BRANCH' --runtime-repo='$RUNTIME_REPO'
+    "
+fi
 
 require_file "$BUNDLE" "Flatpak bundle"
 printf 'Built Flatpak bundle: %s\n' "$BUNDLE"

@@ -37,12 +37,40 @@ jobs:
             dbus-user-session \
             desktop-file-utils \
             dpkg-dev \
-            flatpak \
-            flatpak-builder \
             libadwaita-1-dev \
             libfuse2 \
             libgtk-4-dev \
             pkg-config
+
+      # Flatpak is installed explicitly because the release script now
+      # expects a system-scope Flathub remote that matches flatpak-builder's
+      # dependency resolution behavior on GitHub-hosted runners.
+      - name: Install Flatpak tooling
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y flatpak flatpak-builder
+
+      # The CI failure came from configuring Flathub in one scope while
+      # flatpak-builder later queried another. Keep the runner on a verified
+      # system-scope remote so the build script and builder see the same refs.
+      - name: Configure Flathub (system scope)
+        run: |
+          set -euo pipefail
+          sudo flatpak --system remote-delete flathub || true
+          sudo flatpak --system remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
+          flatpak --version
+          sudo flatpak remotes --system
+          sudo flatpak remote-ls --system flathub | head -50
+
+      - name: Preinstall Flatpak runtimes
+        run: |
+          set -euo pipefail
+          sudo flatpak --system install -y --noninteractive flathub \
+            org.freedesktop.Platform//24.08 \
+            org.freedesktop.Sdk//24.08 \
+            org.freedesktop.Platform.GL.default//24.08 \
+            org.freedesktop.Platform.Locale//24.08
 
       # Install the stable Rust toolchain plus the components used by CI checks.
       - name: Install Rust toolchain

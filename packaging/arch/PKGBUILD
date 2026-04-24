@@ -1,5 +1,5 @@
 pkgname=synchrosonic
-pkgver=0.1.10
+pkgver=0.1.11
 pkgrel=1
 pkgdesc="Linux-first LAN audio streaming and casting application"
 arch=('x86_64')

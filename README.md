@@ -13,7 +13,7 @@ choice, and first-pass Linux release metadata and packaging layouts.
 Current release posture:
 
 - Canonical repository: `https://github.com/UdayaSri0/AudioShare`
-- Current release/tag target: `0.1.10` / `v0.1.10`
+- Current release/tag target: `0.1.11` / `v0.1.11`
 - Developer / Maintainer: `UdayaSri0`
 - Native Linux release builds are supported.
 - The repository stages native install, AppDir, and Debian filesystem layouts for inspection and local validation.
@@ -131,7 +131,7 @@ inspection and layout validation.
 If native Flatpak tooling is unavailable on your machine, the release build
 falls back to a Docker-based Flatpak builder image.
 
-The current release line is `v0.1.10`, with source, issues, and release pages
+The current release line is `v0.1.11`, with source, issues, and release pages
 hosted at the canonical AudioShare repository.
 
 ## Community

@@ -2,6 +2,21 @@
 
 All notable changes to SynchroSonic will be documented in this file.
 
+## [0.1.11] - 2026-04-24
+
+### Changed
+
+- Aligned SynchroSonic release metadata, package metadata, documentation, and release notes for the v0.1.11 release.
+- Refreshed release documentation so the tagged release path clearly describes the generated Linux artifacts.
+- Rechecked release packaging expectations for AppImage, Debian package, Flatpak bundle, portable tarball, and checksum output.
+
+### Fixed
+
+- Corrected stale version references left from previous release-preparation passes.
+- Verified that the tagged release workflow validates v0.1.11 against the root Cargo workspace version.
+- Rechecked release artifact names so generated package names include the correct `0.1.11` version.
+- Confirmed that release publication should attach real installable artifacts instead of only GitHub source archives.
+
 ## [0.1.10] - 2026-04-16
 
 ### Added

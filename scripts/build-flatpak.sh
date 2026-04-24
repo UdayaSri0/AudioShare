@@ -10,6 +10,19 @@ LOCAL_DOCKER_IMAGE="synchrosonic-flatpak-builder:24.04"
 DOCKER_IMAGE="${SYNCHROSONIC_FLATPAK_DOCKER_IMAGE:-$LOCAL_DOCKER_IMAGE}"
 FLATPAK_HOME_ROOT="$ROOT/target/flatpak-home"
 REBUILD_LOCAL_DOCKER_IMAGE="${SYNCHROSONIC_FLATPAK_REBUILD_DOCKER_IMAGE:-0}"
+SKIP_BUILD=0
+
+for arg in "$@"; do
+    case "$arg" in
+        --skip-build)
+            SKIP_BUILD=1
+            ;;
+        *)
+            printf 'unknown argument: %s\n' "$arg" >&2
+            exit 2
+            ;;
+    esac
+done
 
 require_command() {
     local command_name="$1"
@@ -44,6 +57,10 @@ require_file() {
 
 require_file "$MANIFEST" "Flatpak manifest"
 require_file "$RUNNER_SCRIPT" "Flatpak runner script"
+
+if [[ "$SKIP_BUILD" -eq 0 ]]; then
+    cargo build --release -p synchrosonic-app
+fi
 
 export SYNCHROSONIC_FLATPAK_HOME="$FLATPAK_HOME_ROOT/home"
 export SYNCHROSONIC_FLATPAK_CACHE_HOME="$FLATPAK_HOME_ROOT/cache"

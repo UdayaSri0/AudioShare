@@ -1,7 +1,7 @@
 # Linux Packaging And Release Assets
 
 This document describes the current Linux packaging state for SynchroSonic
-after the `0.1.10` release-engineering pass.
+after the `0.1.11` release-alignment pass.
 
 ## What Exists In The Repo Now
 
@@ -291,7 +291,7 @@ To build and install locally:
 
 ```bash
 snapcraft
-sudo snap install --dangerous ./synchrosonic_0.1.10_amd64.snap
+sudo snap install --dangerous ./synchrosonic_0.1.11_amd64.snap
 ```
 
 Current Snap viability and caveats:

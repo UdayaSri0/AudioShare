@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <component type="desktop-application">
-  <id>org.synchrosonic.SynchroSonic.desktop</id>
+  <id>org.synchrosonic.SynchroSonic</id>
   <metadata_license>CC0-1.0</metadata_license>
   <project_license>GPL-3.0-or-later</project_license>
   <name>SynchroSonic</name>
@@ -15,6 +15,15 @@
   <url type="homepage">https://github.com/UdayaSri0/AudioShare</url>
   <url type="bugtracker">https://github.com/UdayaSri0/AudioShare/issues</url>
   <releases>
+    <release version="0.1.11" date="2026-04-24">
+      <description>
+        <ul>
+          <li>Aligned release metadata and packaging documentation for SynchroSonic v0.1.11.</li>
+          <li>Rechecked Linux release artifact expectations for AppImage, Debian, Flatpak, and tarball outputs.</li>
+          <li>Corrected stale version references from earlier release preparation passes.</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.1.10" date="2026-04-16">
       <description>
         <p>
@@ -43,7 +52,7 @@
       limited to selecting local Linux playback outputs exposed by PipeWire.
     </p>
     <p>
-      The current public release line uses version 0.1.10 and the canonical
+      The current public release line uses version 0.1.11 and the canonical
       AudioShare GitHub repository for source, releases, and issue tracking.
     </p>
   </description>

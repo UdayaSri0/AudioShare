@@ -77,7 +77,7 @@ else
         set -euo pipefail
         flatpak remote-add --user --if-not-exists flathub '$RUNTIME_REPO'
         flatpak install --user --noninteractive -y flathub 'org.freedesktop.Platform//$RUNTIME_VERSION' 'org.freedesktop.Sdk//$RUNTIME_VERSION'
-        flatpak-builder --force-clean --install-deps-from=flathub --repo='$REPO_DIR' '$BUILD_DIR' '$MANIFEST'
+        flatpak-builder --user --force-clean --install-deps-from=flathub --repo='$REPO_DIR' '$BUILD_DIR' '$MANIFEST'
         flatpak build-bundle '$REPO_DIR' '$BUNDLE' '$APP_ID' '$APP_BRANCH' --runtime-repo='$RUNTIME_REPO'
     "
 fi

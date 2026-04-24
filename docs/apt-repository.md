@@ -96,7 +96,7 @@ passphrase separately in `APT_GPG_PASSPHRASE`.
 Once Pages and secrets are configured, run the workflow manually from GitHub:
 
 - Workflow: `Publish APT Repository`
-- Input: the ref to publish from, such as `main` or `v0.1.10`
+- Input: the ref to publish from, such as `main` or `v0.1.11`
 
 The workflow currently computes the expected GitHub Pages URL as:
 
@@ -137,4 +137,4 @@ is:
 
 1. enable GitHub Pages with `GitHub Actions` as the source
 2. add `APT_GPG_PRIVATE_KEY_BASE64` and `APT_GPG_PASSPHRASE`
-3. run the `Publish APT Repository` workflow against `main` or `v0.1.10`
+3. run the `Publish APT Repository` workflow against `main` or `v0.1.11`

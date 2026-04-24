@@ -1,6 +1,6 @@
 # Linux Packaging Gap Summary
 
-This summary reflects the current packaging state after the `0.1.10` release
+This summary reflects the current packaging state after the `0.1.11` release
 alignment work.
 
 ## Implemented

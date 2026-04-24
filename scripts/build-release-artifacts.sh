@@ -102,7 +102,7 @@ install_flatpak_deps() {
 build_flatpak_bundle() {
     if ! flatpak_native_tooling_available; then
         log "Native Flatpak tooling not found; delegating to scripts/build-flatpak.sh fallback path"
-        if ! bash "$ROOT/scripts/build-flatpak.sh"; then
+        if ! bash "$ROOT/scripts/build-flatpak.sh" --skip-build; then
             die "Flatpak bundle build failed after AppImage, Debian, and tarball artifacts were already produced"
         fi
         return
@@ -113,7 +113,7 @@ build_flatpak_bundle() {
     install_flatpak_deps
 
     log "Building Flatpak bundle"
-    if ! SYNCHROSONIC_FLATPAK_SKIP_DEP_INSTALL=1 bash "$ROOT/scripts/build-flatpak.sh"; then
+    if ! SYNCHROSONIC_FLATPAK_SKIP_DEP_INSTALL=1 bash "$ROOT/scripts/build-flatpak.sh" --skip-build; then
         die "Flatpak bundle build failed after AppImage, Debian, and tarball artifacts were already produced"
     fi
 }
